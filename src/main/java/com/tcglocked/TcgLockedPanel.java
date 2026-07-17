@@ -21,6 +21,7 @@ import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.Dimension;
+import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.GridLayout;
 import java.awt.RenderingHints;
@@ -34,12 +35,15 @@ import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
+import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.JScrollPane;
 import javax.swing.SwingConstants;
 import javax.swing.border.CompoundBorder;
 import javax.swing.border.MatteBorder;
 import javax.swing.event.MouseInputAdapter;
+import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
@@ -61,13 +65,26 @@ class TcgLockedPanel extends PluginPanel
 	private static final Color LOCK_RED = new Color(0xD0, 0x5B, 0x5B);
 	private static final int MAX_RECENT_ROWS = 8;
 	private static final int MAX_BAG_ROWS = 10;
+	private static final int LOCKBOOK_GRID_CAP = 150;
+	private static final int LOCKBOOK_COLS = 5;
+	private static final int LOCKBOOK_ROW_HEIGHT = 34;
+	private static final int LOCKBOOK_MAX_HEIGHT = 170;
 
+	private enum LockFilter
+	{
+		ALL, UNLOCKED, LOCKED
+	}
+
+	private final ItemManager itemManager;
 	private final JPanel body = new JPanel();
 	private Runnable refreshAction = TcgLockedPanel::noop;
+	private LockFilter filter = LockFilter.ALL;
+	private TcgLockedStatus lastStatus = emptyStatus();
 
 	@Inject
-	TcgLockedPanel()
+	TcgLockedPanel(ItemManager itemManager)
 	{
+		this.itemManager = itemManager;
 		setBackground(ColorScheme.DARK_GRAY_COLOR);
 		setLayout(new BorderLayout());
 
@@ -75,7 +92,7 @@ class TcgLockedPanel extends PluginPanel
 		body.setLayout(new BoxLayout(body, BoxLayout.Y_AXIS));
 		add(body, BorderLayout.NORTH);
 
-		render(emptyStatus());
+		render(lastStatus);
 	}
 
 	void setRefreshAction(Runnable action)
@@ -90,6 +107,7 @@ class TcgLockedPanel extends PluginPanel
 	/** Rebuilds the panel from a snapshot. Call on the EDT. */
 	void update(TcgLockedStatus status)
 	{
+		this.lastStatus = status;
 		render(status);
 		revalidate();
 		repaint();
@@ -102,6 +120,8 @@ class TcgLockedPanel extends PluginPanel
 		body.add(vGap(10));
 		body.add(buildStatTiles(status));
 		body.add(vGap(12));
+		body.add(section("Collection", buildCollection(status)));
+		body.add(vGap(12));
 		body.add(section("Recently unlocked", buildRecent(status)));
 		body.add(vGap(12));
 		body.add(section("Carrying but locked", buildLockedBag(status)));
@@ -110,8 +130,38 @@ class TcgLockedPanel extends PluginPanel
 			body.add(vGap(12));
 			body.add(section("Equipped without a card", buildViolations(status), LOCK_RED));
 		}
+		if (!status.party.isEmpty())
+		{
+			body.add(vGap(12));
+			body.add(section("Party", buildParty(status)));
+		}
 		body.add(vGap(12));
 		body.add(buildFooter(status));
+	}
+
+	private JPanel buildParty(TcgLockedStatus status)
+	{
+		JPanel list = vBox();
+		for (TcgLockedStatus.PartyEntry e : status.party)
+		{
+			JPanel r = new JPanel(new BorderLayout(6, 0));
+			r.setBackground(ColorScheme.DARK_GRAY_COLOR);
+			r.setBorder(BorderFactory.createEmptyBorder(2, 0, 2, 0));
+
+			JLabel name = new JLabel(e.local ? e.name + " (you)" : e.name);
+			name.setFont(FontManager.getRunescapeSmallFont());
+			name.setForeground(e.local ? GOLD : INK);
+
+			JLabel prog = new JLabel(e.unlocked < 0 ? "…" : e.unlocked + " / " + e.seen);
+			prog.setFont(FontManager.getRunescapeSmallFont());
+			prog.setForeground(FAINT);
+			prog.setHorizontalAlignment(SwingConstants.RIGHT);
+
+			r.add(name, BorderLayout.CENTER);
+			r.add(prog, BorderLayout.EAST);
+			list.add(r);
+		}
+		return list;
 	}
 
 	// ---- header -----------------------------------------------------------------------------------------------
@@ -132,11 +182,9 @@ class TcgLockedPanel extends PluginPanel
 		title.setForeground(GOLD);
 		title.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-		JLabel sub = new JLabel(status.collectionLoaded
-			? "Collection linked · " + status.enforcementLabel
-			: "TCG plugin not detected");
+		JLabel sub = new JLabel(status.enforcementLabel.isEmpty() ? "Card locked" : status.enforcementLabel);
 		sub.setFont(FontManager.getRunescapeSmallFont());
-		sub.setForeground(status.collectionLoaded ? MUTED : LOCK_RED);
+		sub.setForeground(MUTED);
 		sub.setAlignmentX(Component.LEFT_ALIGNMENT);
 
 		titles.add(title);
@@ -177,6 +225,145 @@ class TcgLockedPanel extends PluginPanel
 		return tile;
 	}
 
+	// ---- collection lockbook ----------------------------------------------------------------------------------
+
+	private JPanel buildCollection(TcgLockedStatus status)
+	{
+		JPanel box = vBox();
+		if (status.lockbookSeen == 0)
+		{
+			box.add(emptyLine("Items you see get catalogued here."));
+			return box;
+		}
+
+		int seen = status.lockbookSeen;
+		int unlocked = status.lockbookUnlocked;
+		int pct = seen == 0 ? 0 : (int) Math.round(100.0 * unlocked / seen);
+
+		JLabel progress = new JLabel("Unlocked " + unlocked + " / " + seen + "  (" + pct + "%)");
+		progress.setFont(FontManager.getRunescapeSmallFont());
+		progress.setForeground(INK);
+		progress.setBorder(BorderFactory.createEmptyBorder(0, 0, 3, 0));
+		progress.setAlignmentX(Component.LEFT_ALIGNMENT);
+		box.add(progress);
+
+		ProgressBar bar = new ProgressBar(seen == 0 ? 0f : (float) unlocked / seen);
+		bar.setAlignmentX(Component.LEFT_ALIGNMENT);
+		box.add(bar);
+		box.add(vGap(6));
+		box.add(buildFilterRow());
+		box.add(vGap(6));
+
+		JPanel grid = new JPanel(new GridLayout(0, LOCKBOOK_COLS, 2, 2));
+		grid.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		int shown = 0;
+		for (TcgLockedStatus.LockItem li : status.lockItems)
+		{
+			if (!passesFilter(li))
+			{
+				continue;
+			}
+			if (shown >= LOCKBOOK_GRID_CAP)
+			{
+				break;
+			}
+			String tip = li.name + (li.locked ? " (locked)" : "");
+			grid.add(new TcgLockedItemCell(itemManager, li.itemId, li.locked, tip));
+			shown++;
+		}
+
+		if (shown == 0)
+		{
+			box.add(emptyLine(filter == LockFilter.LOCKED ? "Nothing locked here." : "Nothing to show."));
+			return box;
+		}
+
+		// Contain the grid in a fixed-height dark scroll box so a full bank doesn't balloon the whole panel.
+		JScrollPane scroll = new JScrollPane(grid,
+			JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+		scroll.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		scroll.getViewport().setBackground(ColorScheme.DARK_GRAY_COLOR);
+		scroll.setBorder(null);
+		scroll.getVerticalScrollBar().setPreferredSize(new Dimension(8, 0));
+		scroll.getVerticalScrollBar().setUnitIncrement(16);
+		scroll.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+		int rows = (shown + LOCKBOOK_COLS - 1) / LOCKBOOK_COLS;
+		int viewHeight = Math.min(rows * LOCKBOOK_ROW_HEIGHT, LOCKBOOK_MAX_HEIGHT);
+		scroll.setPreferredSize(new Dimension(PANEL_WIDTH - 16, viewHeight));
+		scroll.setMaximumSize(new Dimension(Integer.MAX_VALUE, viewHeight));
+		box.add(scroll);
+		return box;
+	}
+
+	private JPanel buildFilterRow()
+	{
+		JPanel row = new JPanel(new GridLayout(1, 3, 4, 0));
+		row.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		row.setAlignmentX(Component.LEFT_ALIGNMENT);
+		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 22));
+		row.add(filterButton("All", LockFilter.ALL));
+		row.add(filterButton("Unlocked", LockFilter.UNLOCKED));
+		row.add(filterButton("Locked", LockFilter.LOCKED));
+		return row;
+	}
+
+	private JButton filterButton(String label, LockFilter value)
+	{
+		boolean active = filter == value;
+		JButton button = new JButton(label);
+		button.setFocusPainted(false);
+		button.setFont(FontManager.getRunescapeSmallFont());
+		button.setForeground(active ? GOLD : INK);
+		button.setBackground(active ? ColorScheme.DARKER_GRAY_HOVER_COLOR : ColorScheme.DARKER_GRAY_COLOR);
+		button.setBorder(new MatteBorder(1, 1, 1, 1, ColorScheme.BORDER_COLOR));
+		button.addActionListener(e ->
+		{
+			filter = value;
+			update(lastStatus);
+		});
+		return button;
+	}
+
+	private boolean passesFilter(TcgLockedStatus.LockItem item)
+	{
+		switch (filter)
+		{
+			case UNLOCKED:
+				return !item.locked;
+			case LOCKED:
+				return item.locked;
+			default:
+				return true;
+		}
+	}
+
+	private static final class ProgressBar extends JComponent
+	{
+		private final float frac;
+
+		private ProgressBar(float frac)
+		{
+			this.frac = Math.max(0f, Math.min(1f, frac));
+			setPreferredSize(new Dimension(10, 6));
+			setMaximumSize(new Dimension(Integer.MAX_VALUE, 6));
+		}
+
+		@Override
+		protected void paintComponent(Graphics g)
+		{
+			Graphics2D g2 = (Graphics2D) g.create();
+			g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+			int w = getWidth();
+			int h = getHeight();
+			g2.setColor(ColorScheme.DARKER_GRAY_COLOR);
+			g2.fillRoundRect(0, 0, w, h, h, h);
+			g2.setColor(GOLD);
+			g2.fillRoundRect(0, 0, Math.round(w * frac), h, h, h);
+			g2.dispose();
+		}
+	}
+
 	// ---- recent unlocks ---------------------------------------------------------------------------------------
 
 	private JPanel buildRecent(TcgLockedStatus status)
@@ -184,9 +371,7 @@ class TcgLockedPanel extends PluginPanel
 		JPanel list = vBox();
 		if (status.recentUnlocks.isEmpty())
 		{
-			list.add(emptyLine(status.collectionLoaded
-				? "Open a pack to start unlocking."
-				: "Enable the OSRS TCG plugin to begin."));
+			list.add(emptyLine("Open a pack to start unlocking."));
 			return list;
 		}
 
@@ -390,7 +575,7 @@ class TcgLockedPanel extends PluginPanel
 
 	private static TcgLockedStatus emptyStatus()
 	{
-		return new TcgLockedStatus(false, 0, 0, "", List.of(), List.of(), List.of(), 0L);
+		return new TcgLockedStatus(false, 0, 0, "", List.of(), List.of(), List.of(), List.of(), 0, 0, List.of(), 0L);
 	}
 
 	private static String relativeTime(long thenMs, long nowMs)

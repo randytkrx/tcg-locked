@@ -17,14 +17,21 @@
 package com.tcglocked;
 
 import com.google.inject.Provides;
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import javax.inject.Inject;
@@ -35,7 +42,10 @@ import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
+import net.runelite.api.MenuAction;
 import net.runelite.api.MenuEntry;
+import net.runelite.api.NPC;
+import net.runelite.api.SoundEffectID;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuEntryAdded;
@@ -46,11 +56,17 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.game.ItemManager;
+import net.runelite.client.party.PartyMember;
+import net.runelite.client.party.PartyService;
+import net.runelite.client.party.WSClient;
+import net.runelite.client.party.events.UserJoin;
+import net.runelite.client.party.events.UserPart;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
+import net.runelite.client.util.Text;
 
 @Slf4j
 @PluginDescriptor(
@@ -65,9 +81,15 @@ public class TcgLockedPlugin extends Plugin
 	/** Teleport / charge activations that aren't equips: jewelry "Rub", teleport tab "Break", direct "Teleport", etc. */
 	private static final Set<String> ACTIVATION_VERBS =
 		Set.of("rub", "teleport", "break", "commune", "invoke", "operate", "activate");
+	/** Menu actions that count as interacting with an NPC (not Examine). */
+	private static final Set<MenuAction> NPC_ACTIONS = Set.of(
+		MenuAction.NPC_FIRST_OPTION, MenuAction.NPC_SECOND_OPTION, MenuAction.NPC_THIRD_OPTION,
+		MenuAction.NPC_FOURTH_OPTION, MenuAction.NPC_FIFTH_OPTION);
 	private static final String TCG_STATE_GROUP = "osrstcg";
 	private static final String TCG_STATE_KEY = "state";
+	private static final String SEEN_ITEMS_KEY = "seenItems";
 	private static final int RECENT_UNLOCK_CAP = 30;
+	private static final int LOCKBOOK_CAP = 400;
 
 	@Inject
 	private Client client;
@@ -82,6 +104,9 @@ public class TcgLockedPlugin extends Plugin
 	private ItemManager itemManager;
 
 	@Inject
+	private ConfigManager configManager;
+
+	@Inject
 	private TcgLockedCollectionReader collectionReader;
 
 	@Inject
@@ -94,7 +119,16 @@ public class TcgLockedPlugin extends Plugin
 	private TcgLockedItemOverlay itemOverlay;
 
 	@Inject
+	private TcgLockedRevealOverlay revealOverlay;
+
+	@Inject
 	private ClientToolbar clientToolbar;
+
+	@Inject
+	private PartyService partyService;
+
+	@Inject
+	private WSClient wsClient;
 
 	@Inject
 	private TcgLockedPanel panel;
@@ -109,6 +143,20 @@ public class TcgLockedPlugin extends Plugin
 
 	/** Normalized keys from the user's always-allow config list. */
 	private volatile Set<String> extraAllowNormalized = Collections.emptySet();
+
+	/** Normalized names of every monster/NPC that has a card in the TCG catalog (bundled resource). */
+	private final Set<String> npcCardKeys = new HashSet<>();
+
+	/** Item ids the player has encountered (inventory/bank/worn); the lockbook, persisted per RS profile. */
+	private final Set<Integer> seenItemIds = new HashSet<>();
+	private String seenProfileKey;
+
+	/** Other party members' shared progress: memberId to {cardsOwned, unlocked, seen}. */
+	private final Map<Long, int[]> partyProgress = new HashMap<>();
+	/** Other party members' owned card keys, for pooled unlocks: memberId to their normalized keys. */
+	private final Map<Long, Set<String>> partyOwnedKeys = new HashMap<>();
+	/** Last progress values we broadcast, to avoid spamming the party with unchanged updates. */
+	private int[] lastBroadcast;
 
 	/** Item names currently equipped that the player does not own a card for (for overlay + de-duped chat warns). */
 	private volatile List<String> equippedViolationNames = Collections.emptyList();
@@ -143,8 +191,13 @@ public class TcgLockedPlugin extends Plugin
 			.build();
 		clientToolbar.addNavigation(navButton);
 
+		wsClient.registerMessage(TcgLockedPartyProgressMessage.class);
+		wsClient.registerMessage(TcgLockedPartyUnlockMessage.class);
+
+		loadNpcCards();
 		overlayManager.add(overlay);
 		overlayManager.add(itemOverlay);
+		overlayManager.add(revealOverlay);
 
 		rebuildExtraAllow();
 		scheduleRefresh();
@@ -158,8 +211,16 @@ public class TcgLockedPlugin extends Plugin
 			clientToolbar.removeNavigation(navButton);
 			navButton = null;
 		}
+		wsClient.unregisterMessage(TcgLockedPartyProgressMessage.class);
+		wsClient.unregisterMessage(TcgLockedPartyUnlockMessage.class);
+		partyProgress.clear();
+		partyOwnedKeys.clear();
+		lastBroadcast = null;
+
 		overlayManager.remove(overlay);
 		overlayManager.remove(itemOverlay);
+		overlayManager.remove(revealOverlay);
+		revealOverlay.clear();
 
 		ownedLower = Collections.emptySet();
 		ownedNormalized = Collections.emptySet();
@@ -169,6 +230,9 @@ public class TcgLockedPlugin extends Plugin
 		warnedViolationItemIds.clear();
 		previousOwned.clear();
 		recentUnlocks.clear();
+		npcCardKeys.clear();
+		seenItemIds.clear();
+		seenProfileKey = null;
 		baselineEstablished = false;
 		sessionUnlocks = 0;
 	}
@@ -203,6 +267,131 @@ public class TcgLockedPlugin extends Plugin
 	}
 
 	@Subscribe
+	public void onTcgLockedPartyProgressMessage(TcgLockedPartyProgressMessage message)
+	{
+		// Party messages arrive off the client thread; defer so shared state stays single-threaded.
+		if (message != null)
+		{
+			clientThread.invokeLater(() -> handlePartyProgress(message));
+		}
+	}
+
+	private void handlePartyProgress(TcgLockedPartyProgressMessage message)
+	{
+		if (isLocalMember(message.getMemberId()))
+		{
+			return;
+		}
+		boolean firstContact = !partyProgress.containsKey(message.getMemberId());
+		partyProgress.put(message.getMemberId(),
+			new int[]{message.getCardsOwned(), message.getUnlocked(), message.getSeen()});
+		partyOwnedKeys.put(message.getMemberId(),
+			message.getOwnedKeys() != null ? message.getOwnedKeys() : Collections.emptySet());
+		if (firstContact)
+		{
+			// A member we hadn't heard from: reply once so they see us too (converges, no loop).
+			broadcastProgress(true);
+		}
+		publishStatus();
+	}
+
+	@Subscribe
+	public void onTcgLockedPartyUnlockMessage(TcgLockedPartyUnlockMessage message)
+	{
+		if (message != null)
+		{
+			clientThread.invokeLater(() -> handlePartyUnlock(message));
+		}
+	}
+
+	private void handlePartyUnlock(TcgLockedPartyUnlockMessage message)
+	{
+		if (isLocalMember(message.getMemberId()) || !config.partyShare())
+		{
+			return;
+		}
+		String item = message.getItemName();
+		if (item == null || item.trim().isEmpty())
+		{
+			return;
+		}
+		PartyMember from = partyService.getMemberById(message.getMemberId());
+		String who = from != null && from.getDisplayName() != null && !from.getDisplayName().trim().isEmpty()
+			? from.getDisplayName().trim()
+			: "A party member";
+		if (client.getGameState() == GameState.LOGGED_IN)
+		{
+			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
+				"[TCG Locked] " + who + " unlocked " + item.trim() + "!", null);
+		}
+	}
+
+	@Subscribe
+	public void onUserJoin(UserJoin event)
+	{
+		// Someone joined (or we joined and are seeing existing members): re-share our progress so they see us.
+		clientThread.invokeLater(() -> broadcastProgress(true));
+	}
+
+	@Subscribe
+	public void onUserPart(UserPart event)
+	{
+		// Refresh the panel so a departed member drops off the party list.
+		clientThread.invokeLater(this::publishStatus);
+	}
+
+	private boolean isLocalMember(long memberId)
+	{
+		PartyMember local = partyService.getLocalMember();
+		return local != null && local.getMemberId() == memberId;
+	}
+
+	private void broadcastProgress(boolean force)
+	{
+		if (!config.partyShare() || !partyService.isInParty())
+		{
+			return;
+		}
+		int[] current = new int[]{ownedLower.size(), countUnlockedSeen(), seenItemIds.size()};
+		if (!force && lastBroadcast != null
+			&& lastBroadcast[0] == current[0] && lastBroadcast[1] == current[1] && lastBroadcast[2] == current[2])
+		{
+			return;
+		}
+		lastBroadcast = current;
+		TcgLockedPartyProgressMessage message = new TcgLockedPartyProgressMessage();
+		message.setCardsOwned(current[0]);
+		message.setUnlocked(current[1]);
+		message.setSeen(current[2]);
+		message.setOwnedKeys(new HashSet<>(ownedNormalized));
+		partyService.send(message);
+	}
+
+	private void broadcastUnlock(String itemName)
+	{
+		if (!config.partyShare() || !partyService.isInParty() || itemName == null || itemName.isEmpty())
+		{
+			return;
+		}
+		TcgLockedPartyUnlockMessage message = new TcgLockedPartyUnlockMessage();
+		message.setItemName(itemName);
+		partyService.send(message);
+	}
+
+	private int countUnlockedSeen()
+	{
+		int unlocked = 0;
+		for (int id : seenItemIds)
+		{
+			if (isUnlocked(id))
+			{
+				unlocked++;
+			}
+		}
+		return unlocked;
+	}
+
+	@Subscribe
 	public void onMenuEntryAdded(MenuEntryAdded event)
 	{
 		if (config.enforcement() != TcgLockedConfig.Enforcement.BLOCK)
@@ -211,6 +400,23 @@ public class TcgLockedPlugin extends Plugin
 		}
 
 		String verb = event.getOption() == null ? "" : event.getOption().toLowerCase(Locale.ROOT).trim();
+
+		// NPC interaction: block any action on a locked carded monster except Examine.
+		if (effGateNpcs() && !"examine".equals(verb))
+		{
+			MenuEntry[] entries = client.getMenuEntries();
+			if (entries.length > 0)
+			{
+				NPC npc = entries[entries.length - 1].getNpc();
+				if (npc != null && npc.getName() != null && !isNpcUnlocked(npc.getName()))
+				{
+					client.setMenuEntries(Arrays.copyOf(entries, entries.length - 1));
+					return;
+				}
+			}
+		}
+
+		// Item interaction: block gated verbs on locked items.
 		if (!isGatedVerb(verb))
 		{
 			return;
@@ -239,6 +445,18 @@ public class TcgLockedPlugin extends Plugin
 			return;
 		}
 
+		// NPC backstop.
+		if (effGateNpcs() && NPC_ACTIONS.contains(event.getMenuAction()))
+		{
+			String npcName = stripNpcTarget(event.getMenuTarget());
+			if (!npcName.isEmpty() && !isNpcUnlocked(npcName))
+			{
+				event.consume();
+				warn("Locked: you don't own the card for " + npcName + ".");
+				return;
+			}
+		}
+
 		String verb = event.getMenuOption() == null ? "" : event.getMenuOption().toLowerCase(Locale.ROOT).trim();
 		if (!isGatedVerb(verb))
 		{
@@ -259,6 +477,11 @@ public class TcgLockedPlugin extends Plugin
 	public void onItemContainerChanged(ItemContainerChanged event)
 	{
 		int containerId = event.getContainerId();
+		if (containerId == InventoryID.WORN || containerId == InventoryID.INV || containerId == InventoryID.BANK)
+		{
+			catalogSeen(event.getItemContainer());
+		}
+
 		if (containerId == InventoryID.WORN)
 		{
 			recomputeEquippedViolations(event.getItemContainer());
@@ -268,6 +491,36 @@ public class TcgLockedPlugin extends Plugin
 		{
 			recomputeLockedInBag(event.getItemContainer());
 			publishStatus();
+		}
+		else if (containerId == InventoryID.BANK)
+		{
+			publishStatus();
+		}
+	}
+
+	/** Adds every held item to the persistent lockbook of "seen" items. */
+	private void catalogSeen(ItemContainer container)
+	{
+		if (container == null)
+		{
+			return;
+		}
+		boolean grew = false;
+		for (Item item : container.getItems())
+		{
+			if (item.getId() <= 0 || item.getQuantity() <= 0)
+			{
+				continue;
+			}
+			int id = itemManager.canonicalize(item.getId());
+			if (id > 0 && seenItemIds.add(id))
+			{
+				grew = true;
+			}
+		}
+		if (grew)
+		{
+			saveSeenItems();
 		}
 	}
 
@@ -333,6 +586,14 @@ public class TcgLockedPlugin extends Plugin
 	/** Runs on the client thread (scheduled via {@link #scheduleRefresh()}), so unlock-diff state has no races. */
 	private void refreshOwned()
 	{
+		// Load this profile's lockbook once the RS profile is available (first refresh after login).
+		String profileKey = configManager.getRSProfileKey();
+		if (profileKey != null && !profileKey.equals(seenProfileKey))
+		{
+			seenProfileKey = profileKey;
+			loadSeenItems();
+		}
+
 		Set<String> owned = collectionReader.readOwnedCardNamesLower();
 		Set<String> normalized = new HashSet<>();
 		for (String name : owned)
@@ -366,11 +627,14 @@ public class TcgLockedPlugin extends Plugin
 					recentUnlocks.addFirst(new TcgLockedStatus.Unlock(display, now));
 					sessionUnlocks++;
 					announceUnlock(display);
+					revealOverlay.enqueue(display, now);
+					broadcastUnlock(display);
 				}
 				while (recentUnlocks.size() > RECENT_UNLOCK_CAP)
 				{
 					recentUnlocks.removeLast();
 				}
+				playUnlockSound();
 			}
 		}
 		else
@@ -389,6 +653,24 @@ public class TcgLockedPlugin extends Plugin
 	private void publishStatus()
 	{
 		lastUpdatedMs = System.currentTimeMillis();
+
+		List<TcgLockedStatus.LockItem> all = new ArrayList<>(seenItemIds.size());
+		int unlocked = 0;
+		for (int id : seenItemIds)
+		{
+			boolean locked = !isUnlocked(id);
+			if (!locked)
+			{
+				unlocked++;
+			}
+			String name = itemName(id);
+			all.add(new TcgLockedStatus.LockItem(id, name.isEmpty() ? "Item" : name, locked));
+		}
+		all.sort(Comparator.comparing(li -> li.name.toLowerCase(Locale.ROOT)));
+		List<TcgLockedStatus.LockItem> lockItems = all.size() > LOCKBOOK_CAP
+			? new ArrayList<>(all.subList(0, LOCKBOOK_CAP))
+			: all;
+
 		TcgLockedStatus status = new TcgLockedStatus(
 			isCollectionLoaded(),
 			ownedLower.size(),
@@ -397,15 +679,62 @@ public class TcgLockedPlugin extends Plugin
 			new ArrayList<>(recentUnlocks),
 			lockedInBagNames,
 			equippedViolationNames,
+			lockItems,
+			seenItemIds.size(),
+			unlocked,
+			buildPartyEntries(unlocked),
 			lastUpdatedMs);
 		SwingUtilities.invokeLater(() -> panel.update(status));
+
+		broadcastProgress(false);
+	}
+
+	private List<TcgLockedStatus.PartyEntry> buildPartyEntries(int localUnlocked)
+	{
+		if (!config.partyShare() || !partyService.isInParty())
+		{
+			return Collections.emptyList();
+		}
+		List<PartyMember> members = partyService.getMembers();
+		if (members == null || members.isEmpty())
+		{
+			return Collections.emptyList();
+		}
+		PartyMember local = partyService.getLocalMember();
+		long localId = local != null ? local.getMemberId() : -1L;
+
+		Set<Long> live = new HashSet<>();
+		for (PartyMember m : members)
+		{
+			live.add(m.getMemberId());
+		}
+		partyProgress.keySet().retainAll(live);
+		partyOwnedKeys.keySet().retainAll(live);
+
+		List<TcgLockedStatus.PartyEntry> out = new ArrayList<>();
+		for (PartyMember m : members)
+		{
+			String name = m.getDisplayName() != null && !m.getDisplayName().trim().isEmpty()
+				? m.getDisplayName().trim() : "Member";
+			if (m.getMemberId() == localId)
+			{
+				out.add(new TcgLockedStatus.PartyEntry(name, ownedLower.size(), localUnlocked, seenItemIds.size(), true));
+			}
+			else
+			{
+				int[] p = partyProgress.get(m.getMemberId());
+				out.add(p != null
+					? new TcgLockedStatus.PartyEntry(name, p[0], p[1], p[2], false)
+					: new TcgLockedStatus.PartyEntry(name, -1, -1, -1, false));
+			}
+		}
+		return out;
 	}
 
 	private String enforcementLabel()
 	{
 		String mode = config.enforcement() == TcgLockedConfig.Enforcement.BLOCK ? "Blocking" : "Warn only";
-		String scope = config.gateConsumables() ? "gear + food" : "gear";
-		return mode + " · " + scope;
+		return mode + " · " + config.preset();
 	}
 
 	private void rebuildExtraAllow()
@@ -413,30 +742,112 @@ public class TcgLockedPlugin extends Plugin
 		extraAllowNormalized = TcgItemNameNormalizer.normalizeCsv(config.extraAllowList());
 	}
 
+	private void loadSeenItems()
+	{
+		seenItemIds.clear();
+		String csv = configManager.getRSProfileConfiguration(TcgLockedConfig.GROUP, SEEN_ITEMS_KEY);
+		if (csv == null || csv.isEmpty())
+		{
+			return;
+		}
+		for (String part : csv.split(","))
+		{
+			try
+			{
+				int id = Integer.parseInt(part.trim());
+				if (id > 0)
+				{
+					seenItemIds.add(id);
+				}
+			}
+			catch (NumberFormatException ignored)
+			{
+				// skip malformed entry
+			}
+		}
+	}
+
+	private void saveSeenItems()
+	{
+		StringBuilder sb = new StringBuilder(seenItemIds.size() * 6);
+		for (int id : seenItemIds)
+		{
+			if (sb.length() > 0)
+			{
+				sb.append(',');
+			}
+			sb.append(id);
+		}
+		configManager.setRSProfileConfiguration(TcgLockedConfig.GROUP, SEEN_ITEMS_KEY, sb.toString());
+	}
+
 	private boolean isGatedVerb(String verb)
 	{
-		if (config.gateEquipment() && EQUIP_VERBS.contains(verb))
+		if (effGateEquipment() && EQUIP_VERBS.contains(verb))
 		{
 			return true;
 		}
-		if (config.gateTeleports() && ACTIVATION_VERBS.contains(verb))
+		if (effGateTeleports() && ACTIVATION_VERBS.contains(verb))
 		{
 			return true;
 		}
-		return config.gateConsumables() && CONSUME_VERBS.contains(verb);
+		return effGateConsumables() && CONSUME_VERBS.contains(verb);
+	}
+
+	// The difficulty preset overrides the individual toggles unless it is Custom.
+
+	private boolean effGateEquipment()
+	{
+		// Every preset locks gear.
+		return config.preset() != TcgLockedConfig.Preset.CUSTOM || config.gateEquipment();
+	}
+
+	private boolean effGateTeleports()
+	{
+		switch (config.preset())
+		{
+			case CUSTOM:
+				return config.gateTeleports();
+			case GEAR_ONLY:
+				return false;
+			default:
+				return true;
+		}
+	}
+
+	private boolean effGateConsumables()
+	{
+		switch (config.preset())
+		{
+			case CUSTOM:
+				return config.gateConsumables();
+			case EVERYTHING:
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	private boolean effGateNpcs()
+	{
+		switch (config.preset())
+		{
+			case CUSTOM:
+				return config.gateNpcs();
+			case EVERYTHING:
+				return true;
+			default:
+				return false;
+		}
 	}
 
 	/**
-	 * @return true if the player owns a card matching the item (or gating is inactive / the item can't be identified).
-	 * Package-private so the lock-icon overlay shares the exact same gating decision as menu enforcement.
+	 * @return true if the player owns a card matching the item, it is bronze starter gear / on the allow list, or the
+	 * item can't be identified. With no cards owned everything (except those exemptions) is locked. Package-private so
+	 * the lock-icon overlay shares the exact same gating decision as menu enforcement.
 	 */
 	boolean isUnlocked(int itemId)
 	{
-		if (!isCollectionLoaded())
-		{
-			// No TCG collection for this profile: the gamemode is inert (avoids locking everything with zero cards).
-			return true;
-		}
 		int canonical = itemManager.canonicalize(itemId);
 		String name = itemName(canonical);
 		if (name.isEmpty())
@@ -453,17 +864,88 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return true;
 		}
-		if (ownedNormalized.contains(key) || extraAllowNormalized.contains(key))
+		if (ownedNormalized.contains(key) || extraAllowNormalized.contains(key) || unlockedByParty(key))
 		{
 			return true;
 		}
 		return config.unlockStarterGear() && key.startsWith("bronze ");
 	}
 
+	/** @return true if any party member owns a card for this key (pooled unlocks). */
+	private boolean unlockedByParty(String key)
+	{
+		if (!config.partyShare())
+		{
+			return false;
+		}
+		for (Set<String> keys : partyOwnedKeys.values())
+		{
+			if (keys != null && keys.contains(key))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private String itemName(int itemId)
 	{
 		String name = itemManager.getItemComposition(itemId).getName();
 		return name == null ? "" : name.trim();
+	}
+
+	/**
+	 * @return true if the monster may be interacted with: gating inactive, no card exists for it in the catalog, or
+	 * its card is owned. Mirrors {@link #isUnlocked(int)} but for NPC names against the bundled card list.
+	 */
+	private boolean isNpcUnlocked(String npcName)
+	{
+		String key = TcgItemNameNormalizer.normalize(npcName);
+		if (key.isEmpty() || !npcCardKeys.contains(key))
+		{
+			// No card exists for this NPC (or unparseable name): always free.
+			return true;
+		}
+		return ownedNormalized.contains(key) || extraAllowNormalized.contains(key) || unlockedByParty(key);
+	}
+
+	private void loadNpcCards()
+	{
+		npcCardKeys.clear();
+		try (InputStream in = getClass().getResourceAsStream("npc-cards.txt"))
+		{
+			if (in == null)
+			{
+				log.warn("TCG Locked: npc-cards.txt resource missing; monster locking disabled.");
+				return;
+			}
+			try (BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8)))
+			{
+				String line;
+				while ((line = reader.readLine()) != null)
+				{
+					String key = TcgItemNameNormalizer.normalize(line);
+					if (!key.isEmpty())
+					{
+						npcCardKeys.add(key);
+					}
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			log.warn("TCG Locked: failed to load npc-cards.txt", ex);
+		}
+	}
+
+	/** Strips colour tags and a trailing "(level-N)" from an NPC menu target to recover the plain name. */
+	private static String stripNpcTarget(String target)
+	{
+		if (target == null)
+		{
+			return "";
+		}
+		return Text.removeTags(target).replaceAll("\\s*\\(level[^)]*\\)\\s*$", "").trim();
 	}
 
 	private void announceUnlock(String display)
@@ -482,6 +964,14 @@ public class TcgLockedPlugin extends Plugin
 		}
 	}
 
+	private void playUnlockSound()
+	{
+		if (config.unlockSound() && client.getGameState() == GameState.LOGGED_IN)
+		{
+			client.playSoundEffect(SoundEffectID.GE_ADD_OFFER_DINGALING);
+		}
+	}
+
 	private static String displayName(String lower)
 	{
 		if (lower == null || lower.isEmpty())
@@ -497,10 +987,7 @@ public class TcgLockedPlugin extends Plugin
 		return equippedViolationNames;
 	}
 
-	/**
-	 * @return true if a TCG collection is present for this profile. When no cards are owned at all (TCG plugin absent
-	 * or unconfigured) the gamemode is inert and the lock-icon overlay stays hidden.
-	 */
+	/** @return true if at least one card is owned for this profile (informational; locking is active regardless). */
 	boolean isCollectionLoaded()
 	{
 		return !ownedLower.isEmpty();

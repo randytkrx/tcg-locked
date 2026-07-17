@@ -54,7 +54,7 @@ class TcgLockedItemOverlay extends WidgetItemOverlay
 	@Override
 	public void renderItemOverlay(Graphics2D graphics, int itemId, WidgetItem widgetItem)
 	{
-		if (!config.showLockIcons() || !plugin.isCollectionLoaded())
+		if (!config.showLockIcons())
 		{
 			return;
 		}
