@@ -35,12 +35,18 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.config.ConfigManager;
 
 /**
- * Read-only view of the "OSRS TCG" plugin's owned-card collection.
+ * Read-only view of the "OSRS TCG" plugin's owned-card collection, with two ways in:
  *
- * <p>That plugin stores its state, per RuneScape profile, in config group {@code osrstcg} key {@code state} as
- * {@code RLTCG_v2:}&lt;base64(xor(gzip(json)))&gt;, with an unkeyed SHA-256 of the stored blob in key {@code hash}.
- * We decode the same format and pull out the set of owned card names so TCG Locked can gate item usage on them. We
- * never write to that group — the TCG plugin remains the sole owner of its state.</p>
+ * <p>1. Preferred: OSRS TCG's {@link net.runelite.client.events.PluginMessage} API
+ * (its {@code OwnedCardNamesApiService}). The plugin feeds "owned-names" payloads here via
+ * {@link #onApiOwnedNames}; once one arrives it is authoritative and push-updated, until
+ * {@link #invalidate()} (profile switch) re-arms the fallback.</p>
+ *
+ * <p>2. Fallback, for OSRS TCG versions that predate the API: its persisted config state, stored per
+ * RuneScape profile in config group {@code osrstcg} key {@code state} as
+ * {@code RLTCG_v2:}&lt;base64(xor(gzip(json)))&gt;, with an unkeyed SHA-256 of the stored blob in key
+ * {@code hash}. We decode the same format and pull out the owned card names. We never write to that
+ * group — the TCG plugin remains the sole owner of its state.</p>
  */
 @Singleton
 @Slf4j
@@ -60,6 +66,9 @@ class TcgLockedCollectionReader
 	private final ConfigManager configManager;
 	private final Gson gson;
 
+	/** Null until the first PluginMessage payload lands; non-null means the API path is live. */
+	private Set<String> apiOwnedLower;
+
 	@Inject
 	TcgLockedCollectionReader(ConfigManager configManager, Gson gson)
 	{
@@ -68,11 +77,58 @@ class TcgLockedCollectionReader
 	}
 
 	/**
-	 * @return lower-cased, trimmed owned card names for the active profile, or an empty set if the TCG plugin has no
-	 * state, the integrity hash fails (matching how the TCG plugin itself would discard it), or decoding fails.
+	 * Feed in an "ownedNames" payload from OSRS TCG's PluginMessage API. Elements are validated
+	 * individually — the data map is untyped, and a malformed payload should degrade to the
+	 * config fallback rather than throw.
 	 */
-	Set<String> readOwnedCardNamesLower()
+	synchronized void onApiOwnedNames(List<?> names)
 	{
+		if (names == null)
+		{
+			return;
+		}
+		Set<String> normalized = new HashSet<>();
+		for (Object name : names)
+		{
+			if (name instanceof String)
+			{
+				String trimmed = ((String) name).trim();
+				if (!trimmed.isEmpty())
+				{
+					normalized.add(trimmed.toLowerCase(Locale.ROOT));
+				}
+			}
+		}
+		apiOwnedLower = Collections.unmodifiableSet(normalized);
+	}
+
+	/** True once an API payload has arrived; the plugin stops re-querying at that point. */
+	synchronized boolean hasApiData()
+	{
+		return apiOwnedLower != null;
+	}
+
+	/**
+	 * Call on profile switches so one account's collection never lingers for another. Drops API
+	 * data too — it described the previous profile — so the config fallback serves until the
+	 * re-query for the new profile is answered.
+	 */
+	synchronized void invalidate()
+	{
+		apiOwnedLower = null;
+	}
+
+	/**
+	 * @return lower-cased, trimmed owned card names for the active profile: the PluginMessage API's
+	 * payload when one has arrived, else the decoded legacy config state (empty if the TCG plugin has
+	 * no state, the integrity hash fails, or decoding fails).
+	 */
+	synchronized Set<String> readOwnedCardNamesLower()
+	{
+		if (apiOwnedLower != null)
+		{
+			return apiOwnedLower;
+		}
 		String stored = readProfileScoped(STATE_KEY);
 		if (stored == null || stored.isEmpty())
 		{

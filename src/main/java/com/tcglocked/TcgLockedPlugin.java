@@ -91,6 +91,17 @@ public class TcgLockedPlugin extends Plugin
 	private static final int RECENT_UNLOCK_CAP = 30;
 	private static final int LOCKBOOK_CAP = 400;
 
+	// OSRS TCG's PluginMessage API (its OwnedCardNamesApiService). We post a query; it replies
+	// with "owned-names" and pushes "owned-names-changed" after every collection change. String
+	// constants are copied, not imported — Hub plugins can't see each other's classes.
+	private static final String TCG_API_NAMESPACE = "osrstcg";
+	private static final String TCG_API_QUERY = "query-owned-names";
+	private static final String TCG_API_REPLY = "owned-names";
+	private static final String TCG_API_CHANGED = "owned-names-changed";
+	private static final String TCG_API_NAMES_KEY = "ownedNames";
+	/** Re-query cadence (game ticks) until OSRS TCG answers — covers it starting after us. */
+	private static final int API_QUERY_RETRY_TICKS = 100;
+
 	@Inject
 	private Client client;
 
@@ -133,7 +144,16 @@ public class TcgLockedPlugin extends Plugin
 	@Inject
 	private TcgLockedPanel panel;
 
+	@Inject
+	private net.runelite.client.eventbus.EventBus eventBus;
+
 	private NavigationButton navButton;
+
+	/** Ticks until the next osrs-tcg API query; -1 once answered (pushes take over). */
+	private int apiQueryTicks = -1;
+
+	/** Which source the last refresh read (API vs legacy config), to re-baseline on a switch. */
+	private boolean lastSourceWasApi;
 
 	/** Lower-cased owned card names, refreshed from the TCG plugin state. */
 	private volatile Set<String> ownedLower = Collections.emptySet();
@@ -200,6 +220,11 @@ public class TcgLockedPlugin extends Plugin
 		overlayManager.add(revealOverlay);
 
 		rebuildExtraAllow();
+		// Ask OSRS TCG for the collection right away (answers inline if it's already
+		// running, e.g. this plugin was toggled on mid-session); the game-tick loop
+		// retries in case that plugin starts after us.
+		queryTcgApi();
+		apiQueryTicks = collectionReader.hasApiData() ? -1 : 0;
 		scheduleRefresh();
 	}
 
@@ -222,6 +247,8 @@ public class TcgLockedPlugin extends Plugin
 		overlayManager.remove(revealOverlay);
 		revealOverlay.clear();
 
+		collectionReader.invalidate();
+		apiQueryTicks = -1;
 		ownedLower = Collections.emptySet();
 		ownedNormalized = Collections.emptySet();
 		extraAllowNormalized = Collections.emptySet();
@@ -242,7 +269,20 @@ public class TcgLockedPlugin extends Plugin
 	{
 		if (event.getGameState() == GameState.LOGGED_IN)
 		{
+			// Query synchronously first (EventBus.post replies inline when OSRS TCG is
+			// running) so the refresh below reads the real collection, not a transiently
+			// empty one that would chat-warn about every equipped item.
+			queryTcgApi();
 			scheduleRefresh();
+		}
+	}
+
+	/** Posts the osrs-tcg owned-names query if unanswered; safe to call from any event. */
+	private void queryTcgApi()
+	{
+		if (!collectionReader.hasApiData())
+		{
+			eventBus.post(new net.runelite.client.events.PluginMessage(TCG_API_NAMESPACE, TCG_API_QUERY));
 		}
 	}
 
@@ -264,6 +304,58 @@ public class TcgLockedPlugin extends Plugin
 			rebuildExtraAllow();
 			scheduleRefresh();
 		}
+	}
+
+	@Subscribe
+	public void onGameTick(net.runelite.api.events.GameTick event)
+	{
+		// Query the osrs-tcg PluginMessage API until it answers; once a payload has arrived,
+		// its pushes keep us current and this stops (apiQueryTicks stays -1).
+		if (apiQueryTicks >= 0 && --apiQueryTicks < 0)
+		{
+			queryTcgApi();
+			// EventBus.post is synchronous, so an answered query flips hasApiData before this line.
+			apiQueryTicks = collectionReader.hasApiData() ? -1 : API_QUERY_RETRY_TICKS;
+		}
+	}
+
+	/**
+	 * OSRS TCG's PluginMessage API: both the reply to our query and unsolicited pushes after
+	 * collection changes carry the same owned-names payload, so they share a path.
+	 */
+	@Subscribe
+	public void onPluginMessage(net.runelite.client.events.PluginMessage event)
+	{
+		if (!TCG_API_NAMESPACE.equals(event.getNamespace())
+			|| (!TCG_API_REPLY.equals(event.getName()) && !TCG_API_CHANGED.equals(event.getName())))
+		{
+			return;
+		}
+		java.util.Map<String, Object> data = event.getData();
+		Object names = data == null ? null : data.get(TCG_API_NAMES_KEY);
+		if (!(names instanceof List))
+		{
+			return;
+		}
+		boolean firstPayload = !collectionReader.hasApiData();
+		collectionReader.onApiOwnedNames((List<?>) names);
+		if (firstPayload && collectionReader.hasApiData())
+		{
+			log.debug("TCG Locked: osrs-tcg PluginMessage API active; collection now push-updated.");
+		}
+		scheduleRefresh();
+	}
+
+	@Subscribe
+	public void onRuneScapeProfileChanged(net.runelite.client.events.RuneScapeProfileChanged event)
+	{
+		// New account/profile: drop the previous profile's collection (API data included),
+		// re-baseline silently (the cross-profile delta is not "unlocks"), and re-query.
+		collectionReader.invalidate();
+		baselineEstablished = false;
+		queryTcgApi();
+		apiQueryTicks = collectionReader.hasApiData() ? -1 : 0;
+		scheduleRefresh();
 	}
 
 	@Subscribe
@@ -594,6 +686,10 @@ public class TcgLockedPlugin extends Plugin
 			loadSeenItems();
 		}
 
+		// Capture the source flag BEFORE the set: if a payload lands between the two reads,
+		// this pass is treated as config-sourced and the next pass re-baselines silently —
+		// the safe direction. (Set-then-flag could announce a whole collection as unlocks.)
+		final boolean sourceIsApi = collectionReader.hasApiData();
 		Set<String> owned = collectionReader.readOwnedCardNamesLower();
 		Set<String> normalized = new HashSet<>();
 		for (String name : owned)
@@ -606,6 +702,15 @@ public class TcgLockedPlugin extends Plugin
 		}
 		ownedLower = owned;
 		ownedNormalized = normalized;
+
+		// If the data source just switched (the PluginMessage API coming online after an empty
+		// config read, or invalidation dropping back to config), the delta is a source change,
+		// not real unlocks — re-baseline silently instead of announcing the whole collection.
+		if (sourceIsApi != lastSourceWasApi)
+		{
+			lastSourceWasApi = sourceIsApi;
+			baselineEstablished = false;
+		}
 
 		if (baselineEstablished)
 		{
