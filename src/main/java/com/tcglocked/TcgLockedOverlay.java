@@ -42,8 +42,9 @@ class TcgLockedOverlay extends OverlayPanel
 	@Override
 	public Dimension render(Graphics2D graphics)
 	{
-		if (!config.showOverlay())
+		if (!config.showOverlay() || plugin.enforcementDeferred())
 		{
+			// Deferred: Bronzeman TCG owns enforcement, so don't flag violations here too.
 			return null;
 		}
 

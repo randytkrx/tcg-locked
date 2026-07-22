@@ -90,6 +90,20 @@ public interface TcgLockedConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "deferToBronzeman",
+		name = "Defer locking to Bronzeman TCG",
+		description = "When the Bronzeman TCG plugin is enabled, let its restriction engine handle all locking "
+			+ "(no double menu-stripping, padlocks or warnings from this plugin). The lockbook, unlock reveals "
+			+ "and party features keep working. Turn off to enforce with both plugins at once.",
+		section = LOCKING,
+		position = 2
+	)
+	default boolean deferToBronzeman()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "enforcement",
 		name = "Enforcement",
 		description = "Block: remove the equip/use option for cards you don't own. Warn only: allow it but flag violations.",

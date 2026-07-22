@@ -147,7 +147,16 @@ public class TcgLockedPlugin extends Plugin
 	@Inject
 	private net.runelite.client.eventbus.EventBus eventBus;
 
+	@Inject
+	private net.runelite.client.plugins.PluginManager pluginManager;
+
 	private NavigationButton navButton;
+
+	/** Bronzeman TCG's PluginDescriptor name — detected so our enforcement can defer to its engine. */
+	private static final String BRONZEMAN_PLUGIN_NAME = "Bronzeman TCG";
+
+	/** True while the Bronzeman TCG plugin is installed AND enabled. */
+	private volatile boolean bronzemanActive;
 
 	/** Ticks until the next osrs-tcg API query; -1 once answered (pushes take over). */
 	private int apiQueryTicks = -1;
@@ -220,12 +229,51 @@ public class TcgLockedPlugin extends Plugin
 		overlayManager.add(revealOverlay);
 
 		rebuildExtraAllow();
+		detectBronzeman();
 		// Ask OSRS TCG for the collection right away (answers inline if it's already
 		// running, e.g. this plugin was toggled on mid-session); the game-tick loop
 		// retries in case that plugin starts after us.
 		queryTcgApi();
 		apiQueryTicks = collectionReader.hasApiData() ? -1 : 0;
 		scheduleRefresh();
+	}
+
+	/** Re-checks whether Bronzeman TCG is enabled; its engine takes over locking when it is. */
+	private void detectBronzeman()
+	{
+		boolean active = false;
+		for (Plugin p : pluginManager.getPlugins())
+		{
+			PluginDescriptor descriptor = p.getClass().getAnnotation(PluginDescriptor.class);
+			if (descriptor != null && BRONZEMAN_PLUGIN_NAME.equals(descriptor.name())
+				&& pluginManager.isPluginEnabled(p))
+			{
+				active = true;
+				break;
+			}
+		}
+		bronzemanActive = active;
+	}
+
+	/**
+	 * True when locking is handed off to Bronzeman TCG (it's enabled and the user kept the
+	 * default compatibility setting). Our menu-stripping, padlocks and warnings stand down;
+	 * the lockbook, reveals, panel and party features keep running.
+	 */
+	boolean enforcementDeferred()
+	{
+		return config.deferToBronzeman() && bronzemanActive;
+	}
+
+	@Subscribe
+	public void onPluginChanged(net.runelite.client.events.PluginChanged event)
+	{
+		final boolean was = bronzemanActive;
+		detectBronzeman();
+		if (was != bronzemanActive)
+		{
+			scheduleRefresh(); // refreshes the panel footer + overlay visibility
+		}
 	}
 
 	@Override
@@ -486,7 +534,7 @@ public class TcgLockedPlugin extends Plugin
 	@Subscribe
 	public void onMenuEntryAdded(MenuEntryAdded event)
 	{
-		if (config.enforcement() != TcgLockedConfig.Enforcement.BLOCK)
+		if (config.enforcement() != TcgLockedConfig.Enforcement.BLOCK || enforcementDeferred())
 		{
 			return;
 		}
@@ -532,7 +580,7 @@ public class TcgLockedPlugin extends Plugin
 	public void onMenuOptionClicked(MenuOptionClicked event)
 	{
 		// Backstop for any path that reaches a gated action without going through the menu strip above.
-		if (config.enforcement() != TcgLockedConfig.Enforcement.BLOCK)
+		if (config.enforcement() != TcgLockedConfig.Enforcement.BLOCK || enforcementDeferred())
 		{
 			return;
 		}
@@ -838,6 +886,10 @@ public class TcgLockedPlugin extends Plugin
 
 	private String enforcementLabel()
 	{
+		if (enforcementDeferred())
+		{
+			return "Locking by Bronzeman TCG";
+		}
 		String mode = config.enforcement() == TcgLockedConfig.Enforcement.BLOCK ? "Blocking" : "Warn only";
 		return mode + " · " + config.preset();
 	}
@@ -1063,7 +1115,7 @@ public class TcgLockedPlugin extends Plugin
 
 	private void warn(String message)
 	{
-		if (config.warnInChat() && client.getGameState() == GameState.LOGGED_IN)
+		if (config.warnInChat() && !enforcementDeferred() && client.getGameState() == GameState.LOGGED_IN)
 		{
 			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "[TCG Locked] " + message, null);
 		}
