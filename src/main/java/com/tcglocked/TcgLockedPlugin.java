@@ -95,6 +95,12 @@ public class TcgLockedPlugin extends Plugin
 	private static final String TCG_API_NAMES_KEY = "ownedNames";
 	/** Re-query cadence (game ticks) until OSRS TCG answers — covers it starting after us. */
 	private static final int API_QUERY_RETRY_TICKS = 100;
+	/**
+	 * Game ticks of no new cards before held unlocks are shown. Ticks are 600ms, so this is ~4.8s:
+	 * longer than the gap between flipping one card and the next, short enough that a single unlock
+	 * outside a pack still feels immediate.
+	 */
+	private static final int UNLOCK_QUIET_TICKS = 8;
 
 	// Bronzeman TCG's shared-unlocks API. When its engine is the one enforcing, party pooling has no
 	// effect on its own — every check it makes reads the player's collection alone — so the pooled
@@ -191,6 +197,11 @@ public class TcgLockedPlugin extends Plugin
 
 	/** Pooled cards last offered to Bronzeman TCG; null re-sends even if the set is unchanged. */
 	private Set<String> lastSharedWithBronzeman = Collections.emptySet();
+
+	/** Unlocks detected but not yet shown, held while the collection is still changing. */
+	private final List<String> pendingUnlocks = new ArrayList<>();
+	/** Quiet ticks left before {@link #pendingUnlocks} is shown; -1 when nothing is waiting. */
+	private int unlockQuietTicks = -1;
 
 	/** Item names currently equipped that the player does not own a card for (for overlay + de-duped chat warns). */
 	private volatile List<String> equippedViolationNames = Collections.emptyList();
@@ -315,6 +326,8 @@ public class TcgLockedPlugin extends Plugin
 		warnedViolationItemIds.clear();
 		previousOwned.clear();
 		recentUnlocks.clear();
+		pendingUnlocks.clear();
+		unlockQuietTicks = -1;
 		seenItemIds.clear();
 		seenProfileKey = null;
 		baselineEstablished = false;
@@ -376,6 +389,10 @@ public class TcgLockedPlugin extends Plugin
 			queryTcgApi();
 			// EventBus.post is synchronous, so an answered query flips hasCollection before this line.
 			apiQueryTicks = collectionReader.hasCollection() ? -1 : API_QUERY_RETRY_TICKS;
+		}
+		if (unlockQuietTicks >= 0 && --unlockQuietTicks < 0)
+		{
+			showPendingUnlocks();
 		}
 	}
 
@@ -799,21 +816,15 @@ public class TcgLockedPlugin extends Plugin
 			if (!newlyUnlocked.isEmpty())
 			{
 				Collections.sort(newlyUnlocked);
-				long now = System.currentTimeMillis();
 				for (String name : newlyUnlocked)
 				{
-					String display = displayName(name);
-					recentUnlocks.addFirst(new TcgLockedStatus.Unlock(display, now));
-					sessionUnlocks++;
-					announceUnlock(display);
-					revealOverlay.enqueue(display, now);
-					broadcastUnlock(display);
+					pendingUnlocks.add(displayName(name));
 				}
-				while (recentUnlocks.size() > RECENT_UNLOCK_CAP)
-				{
-					recentUnlocks.removeLast();
-				}
-				playUnlockSound();
+				// Cards land in the collection as a pack is opened, one per flip. Showing each one
+				// as it arrives names the card before the player has turned it over, which gives
+				// away their own pack. Holding until the collection goes quiet reveals the lot
+				// together, after the pack is done.
+				unlockQuietTicks = config.waitForPackOpenings() ? UNLOCK_QUIET_TICKS : 0;
 			}
 			previousOwned.clear();
 			previousOwned.addAll(owned);
@@ -829,6 +840,35 @@ public class TcgLockedPlugin extends Plugin
 
 		recomputeEquippedViolations(client.getItemContainer(InventoryID.WORN));
 		recomputeLockedInBag(client.getItemContainer(InventoryID.INV));
+		publishStatus();
+	}
+
+	/**
+	 * Shows everything held back, once the collection has stopped changing. Runs on the client
+	 * thread from the tick loop, like the rest of the unlock bookkeeping.
+	 */
+	private void showPendingUnlocks()
+	{
+		if (pendingUnlocks.isEmpty())
+		{
+			return;
+		}
+		long now = System.currentTimeMillis();
+		for (String display : pendingUnlocks)
+		{
+			recentUnlocks.addFirst(new TcgLockedStatus.Unlock(display, now));
+			sessionUnlocks++;
+			announceUnlock(display);
+			revealOverlay.enqueue(display, now);
+			broadcastUnlock(display);
+		}
+		while (recentUnlocks.size() > RECENT_UNLOCK_CAP)
+		{
+			recentUnlocks.removeLast();
+		}
+		pendingUnlocks.clear();
+		// One chime for the batch: a pack's worth of them at once is the same spoiler in sound.
+		playUnlockSound();
 		publishStatus();
 	}
 

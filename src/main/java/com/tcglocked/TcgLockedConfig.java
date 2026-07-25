@@ -120,7 +120,7 @@ public interface TcgLockedConfig extends Config
 		name = "Lock equipment",
 		description = "Require owning a card before you can Wield / Wear / Equip an item. Used when Difficulty is Custom.",
 		section = LOCKING,
-		position = 2
+		position = 3
 	)
 	default boolean gateEquipment()
 	{
@@ -134,7 +134,7 @@ public interface TcgLockedConfig extends Config
 			+ "(amulets, jewellery, tabs). Spellbook teleports are not items, so they are never affected. "
 			+ "Used when Difficulty is Custom.",
 		section = LOCKING,
-		position = 3
+		position = 4
 	)
 	default boolean gateTeleports()
 	{
@@ -146,7 +146,7 @@ public interface TcgLockedConfig extends Config
 		name = "Lock consumables",
 		description = "Also require owning a card before you can Eat / Drink an item. Used when Difficulty is Custom.",
 		section = LOCKING,
-		position = 4
+		position = 5
 	)
 	default boolean gateConsumables()
 	{
@@ -160,7 +160,7 @@ public interface TcgLockedConfig extends Config
 			+ "Monsters with no card in the TCG catalog are always free, and Examine is always allowed. "
 			+ "Used when Difficulty is Custom.",
 		section = LOCKING,
-		position = 5
+		position = 6
 	)
 	default boolean gateNpcs()
 	{
@@ -175,6 +175,20 @@ public interface TcgLockedConfig extends Config
 		position = 0
 	)
 	default boolean showUnlockReveal()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "waitForPackOpenings",
+		name = "Wait for pack openings",
+		description = "Hold unlock reveals until you have finished opening a pack, so they do not "
+			+ "name a card before you have turned it over. Turn off to show each unlock the moment "
+			+ "it lands.",
+		section = FEEDBACK,
+		position = 2
+	)
+	default boolean waitForPackOpenings()
 	{
 		return true;
 	}
@@ -196,7 +210,7 @@ public interface TcgLockedConfig extends Config
 		name = "Announce unlocks in chat",
 		description = "Post a game message when a newly pulled card unlocks an item.",
 		section = FEEDBACK,
-		position = 2
+		position = 3
 	)
 	default boolean announceUnlocks()
 	{
@@ -208,7 +222,7 @@ public interface TcgLockedConfig extends Config
 		name = "Lock icons on items",
 		description = "Draw a padlock and dim items in the inventory, bank and equipment that you don't own a card for.",
 		section = FEEDBACK,
-		position = 3
+		position = 4
 	)
 	default boolean showLockIcons()
 	{
@@ -220,7 +234,7 @@ public interface TcgLockedConfig extends Config
 		name = "Show violation overlay",
 		description = "Show an overlay listing locked items you currently have equipped.",
 		section = FEEDBACK,
-		position = 4
+		position = 5
 	)
 	default boolean showOverlay()
 	{
@@ -232,7 +246,7 @@ public interface TcgLockedConfig extends Config
 		name = "Warn in chat",
 		description = "Post a game message when a locked item ends up equipped.",
 		section = FEEDBACK,
-		position = 5
+		position = 6
 	)
 	default boolean warnInChat()
 	{
@@ -245,7 +259,7 @@ public interface TcgLockedConfig extends Config
 		description = "When in a RuneLite party, share your unlock progress and announce your unlocks, and show a "
 			+ "party progress list in the panel.",
 		section = FEEDBACK,
-		position = 6
+		position = 7
 	)
 	default boolean partyShare()
 	{
