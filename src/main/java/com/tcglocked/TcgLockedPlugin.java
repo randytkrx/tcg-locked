@@ -96,6 +96,15 @@ public class TcgLockedPlugin extends Plugin
 	/** Re-query cadence (game ticks) until OSRS TCG answers — covers it starting after us. */
 	private static final int API_QUERY_RETRY_TICKS = 100;
 
+	// Bronzeman TCG's shared-unlocks API. When its engine is the one enforcing, party pooling has no
+	// effect on its own — every check it makes reads the player's collection alone — so the pooled
+	// cards are offered to it. Each message carries the complete set and replaces the last.
+	private static final String BRONZEMAN_API_NAMESPACE = "bronzemantcg";
+	private static final String BRONZEMAN_SHARED_UNLOCKS = "shared-unlocks";
+	private static final String BRONZEMAN_SOURCE_KEY = "source";
+	private static final String BRONZEMAN_NAMES_KEY = "cardNames";
+	private static final String BRONZEMAN_SOURCE_NAME = "TCG Locked";
+
 	@Inject
 	private Client client;
 
@@ -177,6 +186,9 @@ public class TcgLockedPlugin extends Plugin
 	private final Map<Long, Set<String>> partyOwnedKeys = new HashMap<>();
 	/** Last progress values we broadcast, to avoid spamming the party with unchanged updates. */
 	private int[] lastBroadcast;
+
+	/** Pooled cards last offered to Bronzeman TCG; null re-sends even if the set is unchanged. */
+	private Set<String> lastSharedWithBronzeman = Collections.emptySet();
 
 	/** Item names currently equipped that the player does not own a card for (for overlay + de-duped chat warns). */
 	private volatile List<String> equippedViolationNames = Collections.emptyList();
@@ -262,6 +274,9 @@ public class TcgLockedPlugin extends Plugin
 		detectBronzeman();
 		if (was != bronzemanActive)
 		{
+			// Bronzeman TCG starting up missed anything offered before it did, so re-offer on the
+			// next refresh rather than leaving the group's cards unknown to the plugin now enforcing.
+			lastSharedWithBronzeman = null;
 			scheduleRefresh(); // refreshes the panel footer + overlay visibility
 		}
 	}
@@ -279,6 +294,9 @@ public class TcgLockedPlugin extends Plugin
 		partyProgress.clear();
 		partyOwnedKeys.clear();
 		lastBroadcast = null;
+		// Withdraw the pooled cards from Bronzeman TCG: with this plugin off, the group's unlocks
+		// should stop applying there too rather than linger for the rest of the session.
+		shareUnlocksWithBronzeman();
 
 		overlayManager.remove(overlay);
 		overlayManager.remove(itemOverlay);
@@ -837,6 +855,7 @@ public class TcgLockedPlugin extends Plugin
 		SwingUtilities.invokeLater(() -> panel.update(status));
 
 		broadcastProgress(false);
+		shareUnlocksWithBronzeman();
 	}
 
 	private List<TcgLockedStatus.PartyEntry> buildPartyEntries(int localUnlocked)
@@ -1045,6 +1064,38 @@ public class TcgLockedPlugin extends Plugin
 		// to open it up. If normalization failed to match a card that does exist we land here too,
 		// which errs towards letting the item through rather than towards a dead end.
 		return !cardCatalog.hasItemCard(key);
+	}
+
+	/**
+	 * Offers the party's pooled cards to Bronzeman TCG, which enforces the same locks from its own
+	 * copy of the collection. Without this, pooled unlocks do nothing whenever that plugin is
+	 * running: it blocks the item regardless of what we decide, so group play quietly stops working.
+	 * Only the pooled extras are sent — the player's own cards it already has.
+	 */
+	private void shareUnlocksWithBronzeman()
+	{
+		Set<String> pooled = new HashSet<>();
+		if (config.partyShare())
+		{
+			for (Set<String> keys : partyOwnedKeys.values())
+			{
+				if (keys != null)
+				{
+					pooled.addAll(keys);
+				}
+			}
+		}
+		if (pooled.equals(lastSharedWithBronzeman))
+		{
+			return;
+		}
+		lastSharedWithBronzeman = pooled;
+		Map<String, Object> data = new HashMap<>();
+		data.put(BRONZEMAN_SOURCE_KEY, BRONZEMAN_SOURCE_NAME);
+		data.put(BRONZEMAN_NAMES_KEY, new ArrayList<>(pooled));
+		// Harmless when Bronzeman TCG isn't installed: nothing is subscribed to the namespace.
+		eventBus.post(new net.runelite.client.events.PluginMessage(
+			BRONZEMAN_API_NAMESPACE, BRONZEMAN_SHARED_UNLOCKS, data));
 	}
 
 	/** @return true if any party member owns a card for this key (pooled unlocks). */
