@@ -16,6 +16,9 @@
  */
 package com.tcglocked;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.Set;
 import org.junit.Test;
 import static org.junit.Assert.assertEquals;
@@ -110,5 +113,68 @@ public class TcgCardCatalogTest
 	public void nullItemKeyIsNotCarded()
 	{
 		assertFalse(catalog.hasItemCard(null));
+	}
+
+	@Test
+	public void packedCollectionRoundTrips()
+	{
+		Set<String> keys = new HashSet<>(Arrays.asList(
+			"abyssal whip", "twisted bow", "shark", "abyssal demon"));
+		assertEquals(keys, catalog.unpackKeys(catalog.packKeys(keys)));
+	}
+
+	@Test
+	public void packingDropsCardsOutsideTheCatalog()
+	{
+		// Lossless for gating: a key with no item or monster behind it can never unlock anything, so
+		// dropping it costs nothing and keeps the bitmap addressable by catalog index.
+		Set<String> keys = new HashSet<>(Arrays.asList("abyssal whip", "not a real card at all"));
+		assertEquals(Collections.singleton("abyssal whip"), catalog.unpackKeys(catalog.packKeys(keys)));
+	}
+
+	@Test
+	public void aSparseCollectionIsDeflated()
+	{
+		// A handful of cards out of thousands is nearly all zero bits, so this is where compressing
+		// earns its keep.
+		String sparse = catalog.packKeys(Collections.singleton("abyssal whip"));
+		assertEquals('z', sparse.charAt(0));
+		assertEquals(Collections.singleton("abyssal whip"), catalog.unpackKeys(sparse));
+	}
+
+	@Test
+	public void aScatteredCollectionRoundTripsWhicheverFormIsChosen()
+	{
+		// Roughly two thirds of the catalog, scattered rather than contiguous, which is the shape a
+		// real part-finished collection has and the case least friendly to compression.
+		Set<String> scattered = new HashSet<>();
+		int index = 0;
+		for (String key : catalog.allCardKeys())
+		{
+			if ((index++ * 2654435761L >>> 16) % 3 != 0)
+			{
+				scattered.add(key);
+			}
+		}
+		String packed = catalog.packKeys(scattered);
+		assertEquals(scattered, catalog.unpackKeys(packed));
+		assertTrue("packed collection was " + packed.length() + " chars", packed.length() < 4000);
+	}
+
+	@Test
+	public void aFullCollectionStaysSmallEnoughToStore()
+	{
+		// The reason for packing at all: thousands of names is tens of kilobytes of synced config.
+		String packed = catalog.packKeys(catalog.allCardKeys());
+		assertTrue("packed collection was " + packed.length() + " chars", packed.length() < 4000);
+	}
+
+	@Test
+	public void unusablePackedDataYieldsNothing()
+	{
+		assertTrue(catalog.unpackKeys(null).isEmpty());
+		assertTrue(catalog.unpackKeys("").isEmpty());
+		assertTrue(catalog.unpackKeys("z!!!not base64!!!").isEmpty());
+		assertTrue(catalog.packKeys(Collections.emptySet()).isEmpty());
 	}
 }

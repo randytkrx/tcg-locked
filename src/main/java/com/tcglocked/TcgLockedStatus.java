@@ -49,7 +49,7 @@ final class TcgLockedStatus
 		}
 	}
 
-	/** One party member's shared progress. */
+	/** One party member's shared progress, or a synced partner who isn't currently in the party. */
 	static final class PartyEntry
 	{
 		final String name;
@@ -57,14 +57,24 @@ final class TcgLockedStatus
 		final int unlocked;
 		final int seen;
 		final boolean local;
+		/** Whether their cards pool with yours; drives the approve / decline / revoke controls. */
+		final TcgLockedPoolConsent.Decision consent;
+		/** False for a saved partner who is not in the party right now. */
+		final boolean present;
+		/** False until their client reports a name, since a decision could not be saved against them. */
+		final boolean decidable;
 
-		PartyEntry(String name, int cardsOwned, int unlocked, int seen, boolean local)
+		PartyEntry(String name, int cardsOwned, int unlocked, int seen, boolean local,
+			TcgLockedPoolConsent.Decision consent, boolean present, boolean decidable)
 		{
+			this.decidable = decidable;
 			this.name = name;
 			this.cardsOwned = cardsOwned;
 			this.unlocked = unlocked;
 			this.seen = seen;
 			this.local = local;
+			this.consent = consent;
+			this.present = present;
 		}
 	}
 

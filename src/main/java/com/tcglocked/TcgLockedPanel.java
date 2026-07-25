@@ -20,6 +20,7 @@ import java.awt.BasicStroke;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
+import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
@@ -29,6 +30,7 @@ import java.awt.geom.Ellipse2D;
 import java.awt.geom.GeneralPath;
 import java.awt.image.BufferedImage;
 import java.util.List;
+import java.util.function.BiConsumer;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import javax.swing.BorderFactory;
@@ -78,6 +80,8 @@ class TcgLockedPanel extends PluginPanel
 	private final ItemManager itemManager;
 	private final JPanel body = new JPanel();
 	private Runnable refreshAction = TcgLockedPanel::noop;
+	/** (player name, approved) — set by the plugin so the pooling controls can act. */
+	private BiConsumer<String, Boolean> consentAction = TcgLockedPanel::noConsent;
 	private LockFilter filter = LockFilter.ALL;
 	private TcgLockedStatus lastStatus = emptyStatus();
 
@@ -100,7 +104,16 @@ class TcgLockedPanel extends PluginPanel
 		this.refreshAction = action == null ? TcgLockedPanel::noop : action;
 	}
 
+	void setConsentAction(BiConsumer<String, Boolean> action)
+	{
+		this.consentAction = action == null ? TcgLockedPanel::noConsent : action;
+	}
+
 	private static void noop()
+	{
+	}
+
+	private static void noConsent(String playerName, boolean approved)
 	{
 	}
 
@@ -148,20 +161,102 @@ class TcgLockedPanel extends PluginPanel
 			r.setBackground(ColorScheme.DARK_GRAY_COLOR);
 			r.setBorder(BorderFactory.createEmptyBorder(2, 0, 2, 0));
 
-			JLabel name = new JLabel(e.local ? e.name + " (you)" : e.name);
+			String suffix = e.local ? " (you)" : e.present ? "" : " (away)";
+			JLabel name = new JLabel(e.name + suffix);
 			name.setFont(FontManager.getRunescapeSmallFont());
 			name.setForeground(e.local ? GOLD : INK);
 
+			r.add(name, BorderLayout.CENTER);
+			r.add(partyRowEast(e), BorderLayout.EAST);
+			list.add(r);
+
+			if (!e.local && e.decidable && e.consent == TcgLockedPoolConsent.Decision.PENDING)
+			{
+				list.add(poolPrompt(e.name));
+			}
+		}
+		return list;
+	}
+
+	/** Progress for anyone settled; for a pending member the progress is replaced by the prompt below. */
+	private JComponent partyRowEast(TcgLockedStatus.PartyEntry e)
+	{
+		if (e.local || !e.decidable || e.consent == TcgLockedPoolConsent.Decision.PENDING)
+		{
 			JLabel prog = new JLabel(e.unlocked < 0 ? "…" : e.unlocked + " / " + e.seen);
 			prog.setFont(FontManager.getRunescapeSmallFont());
 			prog.setForeground(FAINT);
-			prog.setHorizontalAlignment(SwingConstants.RIGHT);
-
-			r.add(name, BorderLayout.CENTER);
-			r.add(prog, BorderLayout.EAST);
-			list.add(r);
+			return prog;
 		}
-		return list;
+
+		JPanel east = new JPanel(new BorderLayout(4, 0));
+		east.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		JLabel prog = new JLabel(e.unlocked < 0 ? "…" : e.unlocked + " / " + e.seen);
+		prog.setFont(FontManager.getRunescapeSmallFont());
+		prog.setForeground(FAINT);
+		east.add(prog, BorderLayout.CENTER);
+
+		boolean pooling = e.consent == TcgLockedPoolConsent.Decision.APPROVED;
+		east.add(linkButton(pooling ? "unsync" : "sync",
+			pooling ? LOCK_RED : ColorScheme.PROGRESS_COMPLETE_COLOR,
+			pooling ? "Stop pooling cards with " + e.name : "Pool cards with " + e.name,
+			() -> consentAction.accept(e.name, !pooling)), BorderLayout.EAST);
+		return east;
+	}
+
+	/** The join prompt: nothing pools until this is answered, and ignoring it stays safe. */
+	private JPanel poolPrompt(String playerName)
+	{
+		JPanel row = new JPanel(new BorderLayout(6, 0));
+		row.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		row.setBorder(BorderFactory.createEmptyBorder(0, 8, 4, 0));
+
+		JLabel ask = new JLabel("Pool unlocks?");
+		ask.setFont(FontManager.getRunescapeSmallFont());
+		ask.setForeground(GOLD);
+
+		JPanel actions = new JPanel(new BorderLayout(6, 0));
+		actions.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		actions.add(linkButton("yes", ColorScheme.PROGRESS_COMPLETE_COLOR,
+			"Share cards with " + playerName + " and use theirs",
+			() -> consentAction.accept(playerName, true)), BorderLayout.CENTER);
+		actions.add(linkButton("no", LOCK_RED,
+			"Never pool with " + playerName,
+			() -> consentAction.accept(playerName, false)), BorderLayout.EAST);
+
+		row.add(ask, BorderLayout.CENTER);
+		row.add(actions, BorderLayout.EAST);
+		return row;
+	}
+
+	private JLabel linkButton(String text, Color color, String tooltip, Runnable onClick)
+	{
+		JLabel label = new JLabel(text);
+		label.setFont(FontManager.getRunescapeSmallFont());
+		label.setForeground(color);
+		label.setToolTipText(tooltip);
+		label.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+		label.addMouseListener(new MouseInputAdapter()
+		{
+			@Override
+			public void mouseClicked(java.awt.event.MouseEvent e)
+			{
+				onClick.run();
+			}
+
+			@Override
+			public void mouseEntered(java.awt.event.MouseEvent e)
+			{
+				label.setForeground(color.brighter());
+			}
+
+			@Override
+			public void mouseExited(java.awt.event.MouseEvent e)
+			{
+				label.setForeground(color);
+			}
+		});
+		return label;
 	}
 
 	// ---- header -----------------------------------------------------------------------------------------------
