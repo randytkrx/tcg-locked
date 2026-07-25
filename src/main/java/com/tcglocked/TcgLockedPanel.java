@@ -98,6 +98,12 @@ class TcgLockedPanel extends PluginPanel
 		body.setLayout(new BoxLayout(body, BoxLayout.Y_AXIS));
 		add(body, BorderLayout.NORTH);
 
+		// PluginPanel wraps us in a JScrollPane and never clears its default border, which draws a
+		// pale line around the whole panel once the content is tall enough for it to engage.
+		getScrollPane().setBorder(null);
+		getScrollPane().setBackground(ColorScheme.DARK_GRAY_COLOR);
+		getScrollPane().getViewport().setBackground(ColorScheme.DARK_GRAY_COLOR);
+
 		render(lastStatus);
 	}
 

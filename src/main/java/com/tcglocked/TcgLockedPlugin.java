@@ -273,6 +273,7 @@ public class TcgLockedPlugin extends Plugin
 
 		wsClient.registerMessage(TcgLockedPartyProgressMessage.class);
 		wsClient.registerMessage(TcgLockedPartyUnlockMessage.class);
+		wsClient.registerMessage(TcgLockedPartyWithdrawMessage.class);
 
 		overlayManager.add(overlay);
 		overlayManager.add(itemOverlay);
@@ -339,6 +340,7 @@ public class TcgLockedPlugin extends Plugin
 		}
 		wsClient.unregisterMessage(TcgLockedPartyProgressMessage.class);
 		wsClient.unregisterMessage(TcgLockedPartyUnlockMessage.class);
+		wsClient.unregisterMessage(TcgLockedPartyWithdrawMessage.class);
 		partyProgress.clear();
 		pooledKeys.clear();
 		offeredKeys.clear();
@@ -576,6 +578,10 @@ public class TcgLockedPlugin extends Plugin
 		clientThread.invokeLater(() ->
 		{
 			broadcastProgress(true);
+			// They may have been offline when we unsynced them, in which case the withdrawal never
+			// reached them and they still hold our cards. Re-send it whenever a declined player is
+			// here; it is idempotent, so repeating it costs nothing.
+			withdrawFromDeclinedMembers();
 			reportPoolPending();
 			publishStatus();
 		});
@@ -1530,12 +1536,99 @@ public class TcgLockedPlugin extends Plugin
 				poolConsent.decline(displayName);
 				pooledKeys.remove(key);
 				forgetPooledPartner(key);
+				// Ask them to drop what we shared. Without this, unsyncing only stops future updates:
+				// they keep everything already sent, saved to disk, indefinitely.
+				sendWithdraw(key);
 			}
 			// Our own keys only go out once everyone present is approved, so a decision changes what
 			// we broadcast as well as what we apply.
 			broadcastProgress(true);
 			refreshOwned();
 		});
+	}
+
+	/** Re-asserts the withdrawal against every declined player currently in the party. */
+	private void withdrawFromDeclinedMembers()
+	{
+		if (!partyService.isInParty())
+		{
+			return;
+		}
+		List<PartyMember> members = partyService.getMembers();
+		if (members == null)
+		{
+			return;
+		}
+		PartyMember local = partyService.getLocalMember();
+		long localId = local != null ? local.getMemberId() : -1L;
+		for (PartyMember member : members)
+		{
+			if (member.getMemberId() == localId)
+			{
+				continue;
+			}
+			String key = rememberMemberKey(member);
+			if (!key.isEmpty()
+				&& poolConsent.decisionFor(member.getDisplayName()) == TcgLockedPoolConsent.Decision.DECLINED)
+			{
+				sendWithdraw(key);
+			}
+		}
+	}
+
+	/** Tells a player to stop using our cards. Harmless if they aren't listening or already dropped them. */
+	private void sendWithdraw(String partnerKey)
+	{
+		if (partnerKey.isEmpty() || !partyService.isInParty())
+		{
+			return;
+		}
+		TcgLockedPartyWithdrawMessage message = new TcgLockedPartyWithdrawMessage();
+		message.setTarget(partnerKey);
+		partyService.send(message);
+	}
+
+	@Subscribe
+	public void onTcgLockedPartyWithdrawMessage(TcgLockedPartyWithdrawMessage message)
+	{
+		if (message != null)
+		{
+			clientThread.invokeLater(() -> handlePartyWithdraw(message));
+		}
+	}
+
+	/**
+	 * Someone has withdrawn our access to their cards. Drop their collection and forget it, exactly
+	 * as if we had unsynced them ourselves — but leave our consent decision alone, so if they share
+	 * again later it applies without having to be re-approved.
+	 */
+	private void handlePartyWithdraw(TcgLockedPartyWithdrawMessage message)
+	{
+		if (isLocalMember(message.getMemberId()))
+		{
+			return;
+		}
+		String localName = client.getLocalPlayer() == null ? null : client.getLocalPlayer().getName();
+		String me = TcgLockedPoolConsent.key(localName);
+		if (me.isEmpty() || !me.equals(TcgLockedPoolConsent.key(message.getTarget())))
+		{
+			// Addressed to someone else in the party; party messages reach everyone.
+			return;
+		}
+		PartyMember from = partyService.getMemberById(message.getMemberId());
+		String senderKey = from == null ? "" : rememberMemberKey(from);
+		if (senderKey.isEmpty())
+		{
+			return;
+		}
+		boolean had = pooledKeys.remove(senderKey) != null;
+		offeredKeys.remove(senderKey);
+		forgetPooledPartner(senderKey);
+		if (had)
+		{
+			chat(from.getDisplayName().trim() + " stopped sharing their cards with you.");
+			refreshOwned();
+		}
 	}
 
 	/** Stores an approved partner's collection as a packed bitmap under their name. */
