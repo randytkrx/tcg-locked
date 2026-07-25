@@ -1112,6 +1112,7 @@ public class TcgLockedPlugin extends Plugin
 			unlocked,
 			pooled,
 			pooledCardKeys.size(),
+			sharingBlockedBy(),
 			buildPartyEntries(unlocked, contributions),
 			lastUpdatedMs);
 		SwingUtilities.invokeLater(() -> panel.update(status));
@@ -1489,6 +1490,32 @@ public class TcgLockedPlugin extends Plugin
 			}
 		}
 		return false;
+	}
+
+	/** @return present members you haven't approved — the reason your cards aren't going out. */
+	private List<String> sharingBlockedBy()
+	{
+		if (!config.partyShare() || !partyService.isInParty())
+		{
+			return Collections.emptyList();
+		}
+		List<PartyMember> members = partyService.getMembers();
+		if (members == null)
+		{
+			return Collections.emptyList();
+		}
+		PartyMember local = partyService.getLocalMember();
+		long localId = local != null ? local.getMemberId() : -1L;
+		List<String> blocking = new ArrayList<>();
+		for (PartyMember member : members)
+		{
+			if (member.getMemberId() != localId && !poolConsent.isApproved(member.getDisplayName()))
+			{
+				String key = rememberMemberKey(member);
+				blocking.add(displayNameFor(member, key));
+			}
+		}
+		return blocking;
 	}
 
 	/**

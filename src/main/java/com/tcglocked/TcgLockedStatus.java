@@ -129,6 +129,11 @@ final class TcgLockedStatus
 	final int lockbookPooled;
 	/** Distinct cards currently pooled in from synced partners. */
 	final int pooledCards;
+	/**
+	 * Players present but not approved. While this is non-empty your cards are not broadcast at all:
+	 * party messages reach everyone, so withholding from one person means withholding from all.
+	 */
+	final List<String> sharingBlockedBy;
 	/** Party members' progress (including the local player) when sharing in a party; empty otherwise. */
 	final List<PartyEntry> party;
 	final long updatedAtMs;
@@ -146,6 +151,7 @@ final class TcgLockedStatus
 		int lockbookUnlocked,
 		int lockbookPooled,
 		int pooledCards,
+		List<String> sharingBlockedBy,
 		List<PartyEntry> party,
 		long updatedAtMs)
 	{
@@ -161,6 +167,7 @@ final class TcgLockedStatus
 		this.lockbookUnlocked = lockbookUnlocked;
 		this.lockbookPooled = lockbookPooled;
 		this.pooledCards = pooledCards;
+		this.sharingBlockedBy = sharingBlockedBy;
 		this.party = party;
 		this.updatedAtMs = updatedAtMs;
 	}

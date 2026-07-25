@@ -164,6 +164,22 @@ class TcgLockedPanel extends PluginPanel
 	{
 		JPanel list = vBox();
 
+		if (!status.sharingBlockedBy.isEmpty())
+		{
+			// The single most confusing thing about pooling: your cards go nowhere while anyone in
+			// the party is undecided, because a party message cannot skip one person.
+			String who = String.join(", ", status.sharingBlockedBy);
+			JLabel blocked = new JLabel("<html>Your cards are not shared yet &mdash; waiting on "
+				+ who + "</html>");
+			blocked.setFont(FontManager.getRunescapeSmallFont());
+			blocked.setForeground(GOLD);
+			blocked.setToolTipText("Party messages reach everyone, so nothing is sent until every "
+				+ "member here is synced or declined.");
+			blocked.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
+			blocked.setAlignmentX(Component.LEFT_ALIGNMENT);
+			list.add(blocked);
+		}
+
 		if (status.pooledCards > 0)
 		{
 			// The headline answer to "what is my group actually giving me?"
@@ -759,7 +775,7 @@ class TcgLockedPanel extends PluginPanel
 	private static TcgLockedStatus emptyStatus()
 	{
 		return new TcgLockedStatus(
-			false, 0, 0, "", List.of(), List.of(), List.of(), List.of(), 0, 0, 0, 0, List.of(), 0L);
+			false, 0, 0, "", List.of(), List.of(), List.of(), List.of(), 0, 0, 0, 0, List.of(), List.of(), 0L);
 	}
 
 	private static String relativeTime(long thenMs, long nowMs)
