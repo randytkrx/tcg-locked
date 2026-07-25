@@ -192,7 +192,7 @@ class TcgLockedPanel extends PluginPanel
 			r.add(partyRowEast(e), BorderLayout.EAST);
 			list.add(r);
 
-			if (!e.local && e.consent == TcgLockedPoolConsent.Decision.APPROVED && e.sharedCards > 0)
+			if (!e.local && e.consent == TcgLockedPoolConsent.Decision.APPROVED)
 			{
 				list.add(sharingLine(e));
 			}
@@ -211,7 +211,11 @@ class TcgLockedPanel extends PluginPanel
 		row.setBackground(ColorScheme.DARK_GRAY_COLOR);
 		row.setBorder(BorderFactory.createEmptyBorder(0, 8, 3, 0));
 
-		JLabel detail = new JLabel(e.sharedCards + " cards shared");
+		// A partner you approved but have never received cards from is still a group member; saying
+		// "no cards yet" is the truth, where showing nothing at all looks like they were forgotten.
+		JLabel detail = new JLabel(e.sharedCards > 0
+			? e.sharedCards + " cards shared"
+			: e.present ? "waiting for their cards" : "no cards yet");
 		detail.setFont(FontManager.getRunescapeSmallFont());
 		detail.setForeground(FAINT);
 

@@ -1178,7 +1178,13 @@ public class TcgLockedPlugin extends Plugin
 			}
 		}
 
-		for (String partnerKey : pooledKeys.keySet())
+		// Everyone you have approved, not merely those whose cards we happen to be holding. A partner
+		// you synced with but never received a collection from (they were not running the plugin, or
+		// had nothing to send yet) would otherwise vanish from the panel the moment you restart, even
+		// though the approval is remembered — which reads as the group being forgotten.
+		Set<String> saved = new TreeSet<>(poolConsent.approvedKeys());
+		saved.addAll(pooledKeys.keySet());
+		for (String partnerKey : saved)
 		{
 			if (listed.contains(partnerKey))
 			{
