@@ -17,10 +17,6 @@
 package com.tcglocked;
 
 import com.google.inject.Provides;
-import java.io.BufferedReader;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -85,8 +81,6 @@ public class TcgLockedPlugin extends Plugin
 	private static final Set<MenuAction> NPC_ACTIONS = Set.of(
 		MenuAction.NPC_FIRST_OPTION, MenuAction.NPC_SECOND_OPTION, MenuAction.NPC_THIRD_OPTION,
 		MenuAction.NPC_FOURTH_OPTION, MenuAction.NPC_FIFTH_OPTION);
-	private static final String TCG_STATE_GROUP = "osrstcg";
-	private static final String TCG_STATE_KEY = "state";
 	private static final String SEEN_ITEMS_KEY = "seenItems";
 	private static final int RECENT_UNLOCK_CAP = 30;
 	private static final int LOCKBOOK_CAP = 400;
@@ -119,6 +113,9 @@ public class TcgLockedPlugin extends Plugin
 
 	@Inject
 	private TcgLockedCollectionReader collectionReader;
+
+	@Inject
+	private TcgCardCatalog cardCatalog;
 
 	@Inject
 	private OverlayManager overlayManager;
@@ -161,9 +158,6 @@ public class TcgLockedPlugin extends Plugin
 	/** Ticks until the next osrs-tcg API query; -1 once answered (pushes take over). */
 	private int apiQueryTicks = -1;
 
-	/** Which source the last refresh read (API vs legacy config), to re-baseline on a switch. */
-	private boolean lastSourceWasApi;
-
 	/** Lower-cased owned card names, refreshed from the TCG plugin state. */
 	private volatile Set<String> ownedLower = Collections.emptySet();
 
@@ -172,9 +166,6 @@ public class TcgLockedPlugin extends Plugin
 
 	/** Normalized keys from the user's always-allow config list. */
 	private volatile Set<String> extraAllowNormalized = Collections.emptySet();
-
-	/** Normalized names of every monster/NPC that has a card in the TCG catalog (bundled resource). */
-	private final Set<String> npcCardKeys = new HashSet<>();
 
 	/** Item ids the player has encountered (inventory/bank/worn); the lockbook, persisted per RS profile. */
 	private final Set<Integer> seenItemIds = new HashSet<>();
@@ -223,7 +214,6 @@ public class TcgLockedPlugin extends Plugin
 		wsClient.registerMessage(TcgLockedPartyProgressMessage.class);
 		wsClient.registerMessage(TcgLockedPartyUnlockMessage.class);
 
-		loadNpcCards();
 		overlayManager.add(overlay);
 		overlayManager.add(itemOverlay);
 		overlayManager.add(revealOverlay);
@@ -234,7 +224,7 @@ public class TcgLockedPlugin extends Plugin
 		// running, e.g. this plugin was toggled on mid-session); the game-tick loop
 		// retries in case that plugin starts after us.
 		queryTcgApi();
-		apiQueryTicks = collectionReader.hasApiData() ? -1 : 0;
+		apiQueryTicks = collectionReader.hasCollection() ? -1 : 0;
 		scheduleRefresh();
 	}
 
@@ -305,7 +295,6 @@ public class TcgLockedPlugin extends Plugin
 		warnedViolationItemIds.clear();
 		previousOwned.clear();
 		recentUnlocks.clear();
-		npcCardKeys.clear();
 		seenItemIds.clear();
 		seenProfileKey = null;
 		baselineEstablished = false;
@@ -317,37 +306,40 @@ public class TcgLockedPlugin extends Plugin
 	{
 		if (event.getGameState() == GameState.LOGGED_IN)
 		{
-			// Query synchronously first (EventBus.post replies inline when OSRS TCG is
-			// running) so the refresh below reads the real collection, not a transiently
-			// empty one that would chat-warn about every equipped item.
-			queryTcgApi();
+			// Re-ask on every login and world hop, and synchronously (EventBus.post replies inline
+			// when the TCG plugin is running) so the refresh below reads the real collection rather
+			// than a transiently unknown one. Also re-syncs after a push we missed while hopping.
+			forceQueryTcgApi();
 			scheduleRefresh();
 		}
 	}
 
-	/** Posts the osrs-tcg owned-names query if unanswered; safe to call from any event. */
+	/**
+	 * Posts the owned-names query, but only while the collection is still unknown — the TCG plugin
+	 * pushes every change after that, so re-asking would be noise.
+	 */
 	private void queryTcgApi()
 	{
-		if (!collectionReader.hasApiData())
+		if (!collectionReader.hasCollection())
 		{
-			eventBus.post(new net.runelite.client.events.PluginMessage(TCG_API_NAMESPACE, TCG_API_QUERY));
+			forceQueryTcgApi();
 		}
+	}
+
+	/**
+	 * Asks for the collection even if we already have one. The query is answered with a fresh
+	 * snapshot, so this recovers from a push we never saw — which is what the panel's Refresh
+	 * button needs to do to be worth pressing.
+	 */
+	private void forceQueryTcgApi()
+	{
+		eventBus.post(new net.runelite.client.events.PluginMessage(TCG_API_NAMESPACE, TCG_API_QUERY));
 	}
 
 	@Subscribe
 	public void onConfigChanged(ConfigChanged event)
 	{
-		String group = event.getGroup();
-		if (TCG_STATE_GROUP.equals(group))
-		{
-			// The TCG plugin saved its state (e.g. a pack was opened) — unlock newly-pulled cards immediately.
-			// Fully event-driven: this fires on every osrstcg save, so no periodic polling is needed.
-			if (TCG_STATE_KEY.equals(event.getKey()))
-			{
-				scheduleRefresh();
-			}
-		}
-		else if (TcgLockedConfig.GROUP.equals(group))
+		if (TcgLockedConfig.GROUP.equals(event.getGroup()))
 		{
 			rebuildExtraAllow();
 			scheduleRefresh();
@@ -362,8 +354,8 @@ public class TcgLockedPlugin extends Plugin
 		if (apiQueryTicks >= 0 && --apiQueryTicks < 0)
 		{
 			queryTcgApi();
-			// EventBus.post is synchronous, so an answered query flips hasApiData before this line.
-			apiQueryTicks = collectionReader.hasApiData() ? -1 : API_QUERY_RETRY_TICKS;
+			// EventBus.post is synchronous, so an answered query flips hasCollection before this line.
+			apiQueryTicks = collectionReader.hasCollection() ? -1 : API_QUERY_RETRY_TICKS;
 		}
 	}
 
@@ -385,9 +377,9 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return;
 		}
-		boolean firstPayload = !collectionReader.hasApiData();
+		boolean firstPayload = !collectionReader.hasCollection();
 		collectionReader.onApiOwnedNames((List<?>) names);
-		if (firstPayload && collectionReader.hasApiData())
+		if (firstPayload && collectionReader.hasCollection())
 		{
 			log.debug("TCG Locked: osrs-tcg PluginMessage API active; collection now push-updated.");
 		}
@@ -402,7 +394,7 @@ public class TcgLockedPlugin extends Plugin
 		collectionReader.invalidate();
 		baselineEstablished = false;
 		queryTcgApi();
-		apiQueryTicks = collectionReader.hasApiData() ? -1 : 0;
+		apiQueryTicks = collectionReader.hasCollection() ? -1 : 0;
 		scheduleRefresh();
 	}
 
@@ -720,6 +712,9 @@ public class TcgLockedPlugin extends Plugin
 
 	private void manualRefresh()
 	{
+		// Re-ask unconditionally: the reply lands inline and the refresh below then reads it, so the
+		// button recovers a stale collection instead of just repainting the same numbers.
+		forceQueryTcgApi();
 		scheduleRefresh();
 	}
 
@@ -734,10 +729,10 @@ public class TcgLockedPlugin extends Plugin
 			loadSeenItems();
 		}
 
-		// Capture the source flag BEFORE the set: if a payload lands between the two reads,
-		// this pass is treated as config-sourced and the next pass re-baselines silently —
-		// the safe direction. (Set-then-flag could announce a whole collection as unlocks.)
-		final boolean sourceIsApi = collectionReader.hasApiData();
+		// Read the "is it known" flag BEFORE the set: if a payload lands between the two reads this
+		// pass is treated as still-unknown and the next one baselines silently, which is the safe
+		// direction. (Set-then-flag could announce an entire collection as unlocks.)
+		final boolean collectionKnown = collectionReader.hasCollection();
 		Set<String> owned = collectionReader.readOwnedCardNamesLower();
 		Set<String> normalized = new HashSet<>();
 		for (String name : owned)
@@ -751,16 +746,15 @@ public class TcgLockedPlugin extends Plugin
 		ownedLower = owned;
 		ownedNormalized = normalized;
 
-		// If the data source just switched (the PluginMessage API coming online after an empty
-		// config read, or invalidation dropping back to config), the delta is a source change,
-		// not real unlocks — re-baseline silently instead of announcing the whole collection.
-		if (sourceIsApi != lastSourceWasApi)
+		if (!collectionKnown)
 		{
-			lastSourceWasApi = sourceIsApi;
+			// The empty set here means "not told yet", not "owns nothing". Diffing against it would
+			// announce the whole collection as unlocks the moment it arrives, so hold the baseline
+			// open until we have real data.
 			baselineEstablished = false;
+			previousOwned.clear();
 		}
-
-		if (baselineEstablished)
+		else if (baselineEstablished)
 		{
 			List<String> newlyUnlocked = new ArrayList<>();
 			for (String name : owned)
@@ -789,14 +783,17 @@ public class TcgLockedPlugin extends Plugin
 				}
 				playUnlockSound();
 			}
+			previousOwned.clear();
+			previousOwned.addAll(owned);
 		}
 		else
 		{
-			// First load establishes the baseline silently — existing cards are not "just unlocked".
+			// First known collection establishes the baseline silently — cards already owned when we
+			// started are not "just unlocked".
 			baselineEstablished = true;
+			previousOwned.clear();
+			previousOwned.addAll(owned);
 		}
-		previousOwned.clear();
-		previousOwned.addAll(owned);
 
 		recomputeEquippedViolations(client.getItemContainer(InventoryID.WORN));
 		recomputeLockedInBag(client.getItemContainer(InventoryID.INV));
@@ -886,6 +883,12 @@ public class TcgLockedPlugin extends Plugin
 
 	private String enforcementLabel()
 	{
+		if (!collectionReader.hasCollection())
+		{
+			// Say so plainly: with no collection nothing is locked, and a player who sees "Blocking"
+			// here while everything works would reasonably report the plugin as broken.
+			return "Waiting for OSRS TCG";
+		}
 		if (enforcementDeferred())
 		{
 			return "Locking by Bronzeman TCG";
@@ -999,12 +1002,20 @@ public class TcgLockedPlugin extends Plugin
 	}
 
 	/**
-	 * @return true if the player owns a card matching the item, it is bronze starter gear / on the allow list, or the
-	 * item can't be identified. With no cards owned everything (except those exemptions) is locked. Package-private so
-	 * the lock-icon overlay shares the exact same gating decision as menu enforcement.
+	 * @return true if the item may be used: the collection isn't known yet, the item has no card at
+	 * all, the player (or their party) owns its card, or it is bronze starter gear / allow-listed.
+	 * Package-private so the lock-icon overlay shares the exact same gating decision as menu
+	 * enforcement.
 	 */
 	boolean isUnlocked(int itemId)
 	{
+		if (!collectionReader.hasCollection())
+		{
+			// The TCG plugin hasn't told us the collection yet (not installed, not started, or still
+			// answering). Locking now would make every item unusable for reasons the player can't
+			// act on, so nothing is locked until we actually know what they own.
+			return true;
+		}
 		int canonical = itemManager.canonicalize(itemId);
 		String name = itemName(canonical);
 		if (name.isEmpty())
@@ -1025,7 +1036,15 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return true;
 		}
-		return config.unlockStarterGear() && key.startsWith("bronze ");
+		if (config.unlockStarterGear() && key.startsWith("bronze "))
+		{
+			return true;
+		}
+		// No card exists for this item, so it is outside the challenge — the same rule monster gating
+		// uses. Locking it would be permanent: there would be nothing the player could ever collect
+		// to open it up. If normalization failed to match a card that does exist we land here too,
+		// which errs towards letting the item through rather than towards a dead end.
+		return !cardCatalog.hasItemCard(key);
 	}
 
 	/** @return true if any party member owns a card for this key (pooled unlocks). */
@@ -1052,47 +1071,36 @@ public class TcgLockedPlugin extends Plugin
 	}
 
 	/**
-	 * @return true if the monster may be interacted with: gating inactive, no card exists for it in the catalog, or
-	 * its card is owned. Mirrors {@link #isUnlocked(int)} but for NPC names against the bundled card list.
+	 * @return true if the monster may be interacted with: the collection isn't known yet, no card
+	 * exists for it, or one of its cards is owned. Mirrors {@link #isUnlocked(int)} for NPC names.
 	 */
 	private boolean isNpcUnlocked(String npcName)
 	{
+		if (!collectionReader.hasCollection())
+		{
+			return true;
+		}
 		String key = TcgItemNameNormalizer.normalize(npcName);
-		if (key.isEmpty() || !npcCardKeys.contains(key))
+		if (key.isEmpty())
+		{
+			return true;
+		}
+		Set<String> cards = cardCatalog.npcCards(key);
+		if (cards.isEmpty())
 		{
 			// No card exists for this NPC (or unparseable name): always free.
 			return true;
 		}
-		return ownedNormalized.contains(key) || extraAllowNormalized.contains(key) || unlockedByParty(key);
-	}
-
-	private void loadNpcCards()
-	{
-		npcCardKeys.clear();
-		try (InputStream in = getClass().getResourceAsStream("npc-cards.txt"))
+		// Several cards can share one in-game name (an "Archer" is carded per location); any of them
+		// unlocks it, and the card's own name is what the collection is keyed by, not the NPC's.
+		for (String card : cards)
 		{
-			if (in == null)
+			if (ownedNormalized.contains(card) || extraAllowNormalized.contains(card) || unlockedByParty(card))
 			{
-				log.warn("TCG Locked: npc-cards.txt resource missing; monster locking disabled.");
-				return;
-			}
-			try (BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8)))
-			{
-				String line;
-				while ((line = reader.readLine()) != null)
-				{
-					String key = TcgItemNameNormalizer.normalize(line);
-					if (!key.isEmpty())
-					{
-						npcCardKeys.add(key);
-					}
-				}
+				return true;
 			}
 		}
-		catch (Exception ex)
-		{
-			log.warn("TCG Locked: failed to load npc-cards.txt", ex);
-		}
+		return false;
 	}
 
 	/** Strips colour tags and a trailing "(level-N)" from an NPC menu target to recover the plain name. */
@@ -1144,9 +1152,12 @@ public class TcgLockedPlugin extends Plugin
 		return equippedViolationNames;
 	}
 
-	/** @return true if at least one card is owned for this profile (informational; locking is active regardless). */
+	/**
+	 * @return true once the TCG plugin has supplied the collection, owning zero cards included. False
+	 * means locking is suspended, which is what the panel reports rather than a card count of zero.
+	 */
 	boolean isCollectionLoaded()
 	{
-		return !ownedLower.isEmpty();
+		return collectionReader.hasCollection();
 	}
 }

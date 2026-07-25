@@ -13,6 +13,11 @@ and a padlock is drawn over it in your inventory, bank and worn equipment. Ownin
 the card for a base item also unlocks its variants, so a single Amulet of glory
 card covers every charge.
 
+Only items that actually have a card are part of the challenge. Plenty of items
+have no card at all, so there would be nothing to collect to open them up, and
+locking those would be a permanent dead end rather than a goal. They are left
+alone, the same way monsters with no card are.
+
 ## What gets locked
 
 Equipment is locked by default, so you cannot wield or wear gear without its card.
@@ -49,7 +54,14 @@ locked out, and an always allow list lets you exempt anything by name.
 ## Requires the OSRS TCG plugin
 
 TCG Locked reads its unlocks from the OSRS TCG plugin, so you need that plugin
-installed with a collection started.
+installed and up to date. It asks OSRS TCG for your collection over that plugin's
+own plugin-to-plugin API, and is then told about every card you pull as it
+happens, so there is nothing to sync by hand.
+
+Until OSRS TCG has answered, TCG Locked locks nothing at all and the panel says
+so. "No collection yet" means the challenge is not running, never that you own no
+cards, so a missing or outdated OSRS TCG plugin can't leave you unable to use your
+gear.
 
 ## Building
 

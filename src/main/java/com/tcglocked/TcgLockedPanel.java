@@ -471,7 +471,7 @@ class TcgLockedPanel extends PluginPanel
 
 		JLabel updated = new JLabel(status.collectionLoaded
 			? "Updated " + relativeTime(status.updatedAtMs, status.updatedAtMs)
-			: "Not linked");
+			: "No collection yet — nothing is locked");
 		updated.setFont(FontManager.getRunescapeSmallFont());
 		updated.setForeground(FAINT);
 		updated.setAlignmentX(Component.LEFT_ALIGNMENT);

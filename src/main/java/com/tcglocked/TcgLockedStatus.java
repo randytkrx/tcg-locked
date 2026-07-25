@@ -68,6 +68,7 @@ final class TcgLockedStatus
 		}
 	}
 
+	/** True once the TCG plugin has supplied the collection; false means locking is suspended. */
 	final boolean collectionLoaded;
 	final int cardsOwned;
 	final int sessionUnlocks;
