@@ -584,8 +584,38 @@ public class TcgLockedPlugin extends Plugin
 	@Subscribe
 	public void onUserPart(UserPart event)
 	{
-		// Refresh the panel so a departed member drops off the party list.
-		clientThread.invokeLater(this::publishStatus);
+		clientThread.invokeLater(() ->
+		{
+			// Drop what only made sense while they were here: their live progress, and any collection
+			// they offered but was never approved. An APPROVED partner's cards deliberately survive —
+			// that is the whole point of syncing with someone — and stay revocable in the panel.
+			partyProgress.remove(event.getMemberId());
+			String key = memberKeyById.remove(event.getMemberId());
+			if (key != null && !key.isEmpty())
+			{
+				offeredKeys.remove(key);
+			}
+			publishStatus();
+		});
+	}
+
+	/**
+	 * Clears state that only means anything inside a party. Without this, leaving one group and
+	 * joining another leaves the first group's members listed and their un-approved offers in memory
+	 * for the rest of the session.
+	 */
+	private void prunePartyStateWhenAlone()
+	{
+		if (partyService.isInParty())
+		{
+			return;
+		}
+		if (!partyProgress.isEmpty() || !memberKeyById.isEmpty() || !offeredKeys.isEmpty())
+		{
+			partyProgress.clear();
+			memberKeyById.clear();
+			offeredKeys.clear();
+		}
 	}
 
 	private boolean isLocalMember(long memberId)
@@ -1019,23 +1049,49 @@ public class TcgLockedPlugin extends Plugin
 	private void publishStatus()
 	{
 		lastUpdatedMs = System.currentTimeMillis();
+		prunePartyStateWhenAlone();
 
 		List<TcgLockedStatus.LockItem> all = new ArrayList<>(seenItemIds.size());
 		int unlocked = 0;
+		int pooled = 0;
+		// How many seen items each partner opens on their own, so the group view can show what each
+		// person is actually contributing rather than just that they are connected.
+		Map<String, Integer> contributions = new HashMap<>();
 		for (int id : seenItemIds)
 		{
-			boolean locked = !isUnlocked(id);
+			TcgLockedStatus.UnlockSource source = unlockSourceFor(id);
+			boolean locked = source == TcgLockedStatus.UnlockSource.LOCKED;
 			if (!locked)
 			{
 				unlocked++;
 			}
+			List<String> unlockedBy = Collections.emptyList();
+			if (source == TcgLockedStatus.UnlockSource.POOLED)
+			{
+				pooled++;
+				unlockedBy = partnersUnlocking(TcgItemNameNormalizer.normalize(itemName(id)));
+				for (String partner : unlockedBy)
+				{
+					contributions.merge(partner, 1, Integer::sum);
+				}
+			}
 			String name = itemName(id);
-			all.add(new TcgLockedStatus.LockItem(id, name.isEmpty() ? "Item" : name, locked));
+			all.add(new TcgLockedStatus.LockItem(
+				id, name.isEmpty() ? "Item" : name, locked, source, unlockedBy));
 		}
 		all.sort(Comparator.comparing(li -> li.name.toLowerCase(Locale.ROOT)));
 		List<TcgLockedStatus.LockItem> lockItems = all.size() > LOCKBOOK_CAP
 			? new ArrayList<>(all.subList(0, LOCKBOOK_CAP))
 			: all;
+
+		Set<String> pooledCardKeys = new HashSet<>();
+		for (Set<String> keys : pooledKeys.values())
+		{
+			if (keys != null)
+			{
+				pooledCardKeys.addAll(keys);
+			}
+		}
 
 		TcgLockedStatus status = new TcgLockedStatus(
 			isCollectionLoaded(),
@@ -1048,7 +1104,9 @@ public class TcgLockedPlugin extends Plugin
 			lockItems,
 			seenItemIds.size(),
 			unlocked,
-			buildPartyEntries(unlocked),
+			pooled,
+			pooledCardKeys.size(),
+			buildPartyEntries(unlocked, contributions),
 			lastUpdatedMs);
 		SwingUtilities.invokeLater(() -> panel.update(status));
 
@@ -1061,7 +1119,8 @@ public class TcgLockedPlugin extends Plugin
 	 * who is not — their cards still apply, so they must remain revocable without having to get back
 	 * into a party with them first.
 	 */
-	private List<TcgLockedStatus.PartyEntry> buildPartyEntries(int localUnlocked)
+	private List<TcgLockedStatus.PartyEntry> buildPartyEntries(int localUnlocked,
+		Map<String, Integer> contributions)
 	{
 		if (!config.partyShare())
 		{
@@ -1095,16 +1154,21 @@ public class TcgLockedPlugin extends Plugin
 				if (isLocal)
 				{
 					out.add(new TcgLockedStatus.PartyEntry(name, ownedLower.size(), localUnlocked,
-						seenItemIds.size(), true, TcgLockedPoolConsent.Decision.APPROVED, true, false));
+						seenItemIds.size(), true, TcgLockedPoolConsent.Decision.APPROVED, true, false,
+						ownedNormalized.size(), 0));
 					continue;
 				}
 				int[] p = partyProgress.get(m.getMemberId());
 				// Nobody to save a decision against until their client reports a name, so no prompt
 				// is offered for them yet rather than one that could not be acted on.
 				TcgLockedPoolConsent.Decision consent = poolConsent.decisionFor(name);
+				int shared = sharedCardCount(key);
+				int gives = contributions.getOrDefault(key, 0);
 				out.add(p != null
-					? new TcgLockedStatus.PartyEntry(name, p[0], p[1], p[2], false, consent, true, !key.isEmpty())
-					: new TcgLockedStatus.PartyEntry(name, -1, -1, -1, false, consent, true, !key.isEmpty()));
+					? new TcgLockedStatus.PartyEntry(name, p[0], p[1], p[2], false, consent, true,
+						!key.isEmpty(), shared, gives)
+					: new TcgLockedStatus.PartyEntry(name, -1, -1, -1, false, consent, true,
+						!key.isEmpty(), shared, gives));
 			}
 		}
 
@@ -1115,7 +1179,8 @@ public class TcgLockedPlugin extends Plugin
 				continue;
 			}
 			out.add(new TcgLockedStatus.PartyEntry(partnerKey, -1, -1, -1, false,
-				TcgLockedPoolConsent.Decision.APPROVED, false, true));
+				TcgLockedPoolConsent.Decision.APPROVED, false, true,
+				sharedCardCount(partnerKey), contributions.getOrDefault(partnerKey, 0)));
 		}
 		return out;
 	}
@@ -1273,42 +1338,90 @@ public class TcgLockedPlugin extends Plugin
 	 */
 	boolean isUnlocked(int itemId)
 	{
+		return unlockSourceFor(itemId) != TcgLockedStatus.UnlockSource.LOCKED;
+	}
+
+	/**
+	 * The same decision {@link #isUnlocked(int)} makes, but reporting WHY. A player needs to be able
+	 * to tell their own progress apart from what a group member is lending them — otherwise a pooled
+	 * collection quietly reads as their own.
+	 *
+	 * <p>Order matters: owning the card yourself always wins over the group, so your own progress is
+	 * never attributed to someone else.</p>
+	 */
+	TcgLockedStatus.UnlockSource unlockSourceFor(int itemId)
+	{
 		if (!collectionReader.hasCollection())
 		{
 			// The TCG plugin hasn't told us the collection yet (not installed, not started, or still
 			// answering). Locking now would make every item unusable for reasons the player can't
 			// act on, so nothing is locked until we actually know what they own.
-			return true;
+			return TcgLockedStatus.UnlockSource.SUSPENDED;
 		}
 		int canonical = itemManager.canonicalize(itemId);
 		String name = itemName(canonical);
 		if (name.isEmpty())
 		{
 			// Unknown item name: don't lock the player out of something we can't identify.
-			return true;
+			return TcgLockedStatus.UnlockSource.UNCARDED;
 		}
 		if (ownedLower.contains(name.toLowerCase(Locale.ROOT)))
 		{
-			return true;
+			return TcgLockedStatus.UnlockSource.OWNED;
 		}
 		String key = TcgItemNameNormalizer.normalize(name);
 		if (key.isEmpty())
 		{
-			return true;
+			return TcgLockedStatus.UnlockSource.UNCARDED;
 		}
-		if (ownedNormalized.contains(key) || extraAllowNormalized.contains(key) || unlockedByParty(key))
+		if (ownedNormalized.contains(key))
 		{
-			return true;
+			return TcgLockedStatus.UnlockSource.OWNED;
+		}
+		if (extraAllowNormalized.contains(key))
+		{
+			return TcgLockedStatus.UnlockSource.EXEMPT;
+		}
+		if (unlockedByParty(key))
+		{
+			return TcgLockedStatus.UnlockSource.POOLED;
 		}
 		if (config.unlockStarterGear() && key.startsWith("bronze "))
 		{
-			return true;
+			return TcgLockedStatus.UnlockSource.EXEMPT;
 		}
 		// No card exists for this item, so it is outside the challenge — the same rule monster gating
 		// uses. Locking it would be permanent: there would be nothing the player could ever collect
 		// to open it up. If normalization failed to match a card that does exist we land here too,
 		// which errs towards letting the item through rather than towards a dead end.
-		return !cardCatalog.hasItemCard(key);
+		return cardCatalog.hasItemCard(key)
+			? TcgLockedStatus.UnlockSource.LOCKED : TcgLockedStatus.UnlockSource.UNCARDED;
+	}
+
+	/** @return how many cards this partner currently has in your pool; 0 if they aren't synced. */
+	private int sharedCardCount(String partnerKey)
+	{
+		Set<String> keys = pooledKeys.get(partnerKey);
+		return keys == null ? 0 : keys.size();
+	}
+
+	/** @return the synced partners whose cards unlock this item, for the panel's group view. */
+	private List<String> partnersUnlocking(String key)
+	{
+		if (!config.partyShare() || key.isEmpty())
+		{
+			return Collections.emptyList();
+		}
+		List<String> names = new ArrayList<>();
+		for (Map.Entry<String, Set<String>> entry : pooledKeys.entrySet())
+		{
+			Set<String> keys = entry.getValue();
+			if (keys != null && keys.contains(key))
+			{
+				names.add(entry.getKey());
+			}
+		}
+		return names;
 	}
 
 	/**

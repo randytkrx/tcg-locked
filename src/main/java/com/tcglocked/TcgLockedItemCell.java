@@ -28,21 +28,29 @@ import javax.swing.JComponent;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.util.AsyncBufferedImage;
 
-/** One lockbook cell: the item's icon, dimmed with a padlock when locked. */
+/**
+ * One lockbook cell: the item's icon, dimmed with a padlock when locked, and marked with a corner
+ * flash when it is open only because a group member owns the card rather than you.
+ */
 class TcgLockedItemCell extends JComponent
 {
 	private static final Dimension SIZE = new Dimension(36, 32);
 	private static final Color LOCK_TINT = new Color(0, 0, 0, 150);
 	private static final Color LOCK_FILL = new Color(230, 230, 230);
 	private static final Color LOCK_OUTLINE = new Color(20, 20, 20, 220);
+	/** Group blue, distinct from the gold used for the player's own progress. */
+	private static final Color POOLED_MARK = new Color(0x5B, 0x9B, 0xD5);
+	private static final Color POOLED_MARK_EDGE = new Color(20, 20, 20, 180);
 
 	private final AsyncBufferedImage image;
 	private final boolean locked;
+	private final boolean pooled;
 
-	TcgLockedItemCell(ItemManager itemManager, int itemId, boolean locked, String tooltip)
+	TcgLockedItemCell(ItemManager itemManager, int itemId, boolean locked, boolean pooled, String tooltip)
 	{
 		this.image = itemManager.getImage(itemId);
 		this.locked = locked;
+		this.pooled = pooled;
 		setPreferredSize(SIZE);
 		setToolTipText(tooltip);
 		image.onLoaded(this::repaint);
@@ -59,6 +67,17 @@ class TcgLockedItemCell extends JComponent
 			g2.setColor(LOCK_TINT);
 			g2.fillRect(0, 0, SIZE.width, SIZE.height);
 			drawPadlock(g2, SIZE.width - 11, SIZE.height - 13);
+		}
+		else if (pooled)
+		{
+			// Top-left triangle: reads at a glance across a grid without hiding the item art.
+			int[] xs = {0, 8, 0};
+			int[] ys = {0, 0, 8};
+			g2.setColor(POOLED_MARK);
+			g2.fillPolygon(xs, ys, 3);
+			g2.setColor(POOLED_MARK_EDGE);
+			g2.setStroke(new BasicStroke(1f));
+			g2.drawLine(8, 0, 0, 8);
 		}
 		g2.dispose();
 	}
