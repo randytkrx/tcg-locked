@@ -167,12 +167,15 @@ public interface TcgLockedConfig extends Config
 		return false;
 	}
 
+	// Hidden while the reveal is disabled, so nobody toggles a setting that does nothing. The stored
+	// value is left untouched and takes effect again if the reveal comes back.
 	@ConfigItem(
 		keyName = "showUnlockReveal",
 		name = "Unlock reveal",
 		description = "Show a reveal card with the item art when a newly pulled card unlocks an item.",
 		section = FEEDBACK,
-		position = 0
+		position = 0,
+		hidden = true
 	)
 	default boolean showUnlockReveal()
 	{

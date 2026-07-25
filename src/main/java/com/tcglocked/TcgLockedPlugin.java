@@ -241,7 +241,7 @@ public class TcgLockedPlugin extends Plugin
 
 		overlayManager.add(overlay);
 		overlayManager.add(itemOverlay);
-		overlayManager.add(revealOverlay);
+		// overlayManager.add(revealOverlay); // disabled with the reveal, see showPendingUnlocks
 
 		rebuildExtraAllow();
 		detectBronzeman();
@@ -859,7 +859,12 @@ public class TcgLockedPlugin extends Plugin
 			recentUnlocks.addFirst(new TcgLockedStatus.Unlock(display, now));
 			sessionUnlocks++;
 			announceUnlock(display);
-			revealOverlay.enqueue(display, now);
+			// Reveal disabled for now: cards enter the collection the moment a pack is opened, not as
+			// each one is flipped, so the reveal names them before the player has turned them over.
+			// The quiet-period delay only postpones that, it cannot know when the flipping is done.
+			// Restore this (and the overlay registration in startUp) once OSRS TCG signals the end of
+			// a pack reveal, or commits the cards when the interface closes.
+			// revealOverlay.enqueue(display, now);
 			broadcastUnlock(display);
 		}
 		while (recentUnlocks.size() > RECENT_UNLOCK_CAP)
