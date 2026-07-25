@@ -31,4 +31,13 @@ public class TcgLockedPartyProgressMessage extends PartyMemberMessage
 	private int seen;
 	/** Normalized owned card keys, so party members can unlock items any member owns. */
 	private Set<String> ownedKeys;
+	/**
+	 * RuneScape names this player is sharing with. A party message reaches everyone, so the payload
+	 * has to say who it is meant for — recipients not named here ignore the cards.
+	 *
+	 * <p>That keeps sharing consensual in both directions without silencing the whole party: you can
+	 * share with the people you approved while someone else in the same party is still undecided.
+	 * Like the rest of the plugin it asks the other client to comply rather than enforcing it.</p>
+	 */
+	private Set<String> sharedWith;
 }

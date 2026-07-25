@@ -82,6 +82,9 @@ public class TcgLockedPlugin extends Plugin
 		MenuAction.NPC_FIRST_OPTION, MenuAction.NPC_SECOND_OPTION, MenuAction.NPC_THIRD_OPTION,
 		MenuAction.NPC_FOURTH_OPTION, MenuAction.NPC_FIFTH_OPTION);
 	private static final String SEEN_ITEMS_KEY = "seenItems";
+	/** CSV of the RuneScape names whose collections are stored; each blob lives under its own key. */
+	private static final String POOLED_PARTNERS_KEY = "pooledPartners";
+	private static final String POOLED_PREFIX = "pooled_";
 	private static final int RECENT_UNLOCK_CAP = 30;
 	private static final int LOCKBOOK_CAP = 400;
 
@@ -135,6 +138,9 @@ public class TcgLockedPlugin extends Plugin
 	private TcgCardCatalog cardCatalog;
 
 	@Inject
+	private TcgLockedPoolConsent poolConsent;
+
+	@Inject
 	private OverlayManager overlayManager;
 
 	@Inject
@@ -175,6 +181,24 @@ public class TcgLockedPlugin extends Plugin
 	/** Ticks until the next osrs-tcg API query; -1 once answered (pushes take over). */
 	private int apiQueryTicks = -1;
 
+	/**
+	 * Whether this session has said in chat that no collection arrived, and that one did. Suspended
+	 * locking is otherwise invisible — everything simply works, which reads as the plugin being
+	 * broken rather than as the challenge not having started.
+	 */
+	private boolean saidNoCollection;
+	private boolean saidCollectionLoaded;
+
+	/** Players we've mentioned in chat as awaiting a pooling decision, so it's said once each. */
+	private final Set<String> saidPoolPending = new HashSet<>();
+
+	/**
+	 * Member id to the name key we resolved for it. A {@link PartyMember} starts out as
+	 * {@code <unknown>} until their client reports in, and relogging or hopping gives them a fresh
+	 * id, so the current display name is not a reliable way to recognise someone.
+	 */
+	private final Map<Long, String> memberKeyById = new HashMap<>();
+
 	/** Lower-cased owned card names, refreshed from the TCG plugin state. */
 	private volatile Set<String> ownedLower = Collections.emptySet();
 
@@ -190,8 +214,18 @@ public class TcgLockedPlugin extends Plugin
 
 	/** Other party members' shared progress: memberId to {cardsOwned, unlocked, seen}. */
 	private final Map<Long, int[]> partyProgress = new HashMap<>();
-	/** Other party members' owned card keys, for pooled unlocks: memberId to their normalized keys. */
-	private final Map<Long, Set<String>> partyOwnedKeys = new HashMap<>();
+	/**
+	 * Approved partners' card keys, by RuneScape name. Survives leaving the party and restarts —
+	 * the party is only the transport, so a synced partner keeps unlocking things until you revoke
+	 * them, refreshed whenever you are in a party together again.
+	 */
+	private final Map<String, Set<String>> pooledKeys = new HashMap<>();
+
+	/**
+	 * Collections received from players not (yet) approved, this session only. Held so that saying
+	 * yes applies immediately instead of waiting for them to broadcast again.
+	 */
+	private final Map<String, Set<String>> offeredKeys = new HashMap<>();
 	/** Last progress values we broadcast, to avoid spamming the party with unchanged updates. */
 	private int[] lastBroadcast;
 
@@ -228,6 +262,7 @@ public class TcgLockedPlugin extends Plugin
 	protected void startUp()
 	{
 		panel.setRefreshAction(this::manualRefresh);
+		panel.setConsentAction(this::setPoolConsent);
 		navButton = NavigationButton.builder()
 			.tooltip("TCG Locked")
 			.icon(TcgLockedPanel.crestIcon(24))
@@ -238,6 +273,7 @@ public class TcgLockedPlugin extends Plugin
 
 		wsClient.registerMessage(TcgLockedPartyProgressMessage.class);
 		wsClient.registerMessage(TcgLockedPartyUnlockMessage.class);
+		wsClient.registerMessage(TcgLockedPartyWithdrawMessage.class);
 
 		overlayManager.add(overlay);
 		overlayManager.add(itemOverlay);
@@ -304,8 +340,15 @@ public class TcgLockedPlugin extends Plugin
 		}
 		wsClient.unregisterMessage(TcgLockedPartyProgressMessage.class);
 		wsClient.unregisterMessage(TcgLockedPartyUnlockMessage.class);
+		wsClient.unregisterMessage(TcgLockedPartyWithdrawMessage.class);
 		partyProgress.clear();
-		partyOwnedKeys.clear();
+		pooledKeys.clear();
+		offeredKeys.clear();
+		saidPoolPending.clear();
+		memberKeyById.clear();
+		saidNoCollection = false;
+		saidCollectionLoaded = false;
+		poolConsent.invalidate();
 		lastBroadcast = null;
 		// Withdraw the pooled cards from Bronzeman TCG: with this plugin off, the group's unlocks
 		// should stop applying there too rather than linger for the rest of the session.
@@ -441,6 +484,14 @@ public class TcgLockedPlugin extends Plugin
 		// New account/profile: drop the previous profile's collection (API data included),
 		// re-baseline silently (the cross-profile delta is not "unlocks"), and re-query.
 		collectionReader.invalidate();
+		poolConsent.invalidate();
+		pooledKeys.clear();
+		offeredKeys.clear();
+		saidPoolPending.clear();
+		memberKeyById.clear();
+		saidNoCollection = false;
+		saidCollectionLoaded = false;
+		seenProfileKey = null;
 		baselineEstablished = false;
 		queryTcgApi();
 		apiQueryTicks = collectionReader.hasCollection() ? -1 : 0;
@@ -466,8 +517,22 @@ public class TcgLockedPlugin extends Plugin
 		boolean firstContact = !partyProgress.containsKey(message.getMemberId());
 		partyProgress.put(message.getMemberId(),
 			new int[]{message.getCardsOwned(), message.getUnlocked(), message.getSeen()});
-		partyOwnedKeys.put(message.getMemberId(),
-			message.getOwnedKeys() != null ? message.getOwnedKeys() : Collections.emptySet());
+
+		Set<String> sent = message.getOwnedKeys();
+		PartyMember from = partyService.getMemberById(message.getMemberId());
+		String partnerKey = from == null ? "" : rememberMemberKey(from);
+		if (sent != null && !partnerKey.isEmpty() && addressedToUs(message.getSharedWith()))
+		{
+			// Keys reach the whole party — there is no per-recipient send — so two things gate them:
+			// the sender addressing us, and our own consent. Both must agree, which is what keeps
+			// sharing mutual rather than something either side can impose.
+			offeredKeys.put(partnerKey, sent);
+			if (poolConsent.isApproved(partnerKey))
+			{
+				pooledKeys.put(partnerKey, sent);
+				savePooledPartner(partnerKey, sent);
+			}
+		}
 		if (firstContact)
 		{
 			// A member we hadn't heard from: reply once so they see us too (converges, no loop).
@@ -511,14 +576,53 @@ public class TcgLockedPlugin extends Plugin
 	public void onUserJoin(UserJoin event)
 	{
 		// Someone joined (or we joined and are seeing existing members): re-share our progress so they see us.
-		clientThread.invokeLater(() -> broadcastProgress(true));
+		clientThread.invokeLater(() ->
+		{
+			broadcastProgress(true);
+			// They may have been offline when we unsynced them, in which case the withdrawal never
+			// reached them and they still hold our cards. Re-send it whenever a declined player is
+			// here; it is idempotent, so repeating it costs nothing.
+			withdrawFromDeclinedMembers();
+			reportPoolPending();
+			publishStatus();
+		});
 	}
 
 	@Subscribe
 	public void onUserPart(UserPart event)
 	{
-		// Refresh the panel so a departed member drops off the party list.
-		clientThread.invokeLater(this::publishStatus);
+		clientThread.invokeLater(() ->
+		{
+			// Drop what only made sense while they were here: their live progress, and any collection
+			// they offered but was never approved. An APPROVED partner's cards deliberately survive —
+			// that is the whole point of syncing with someone — and stay revocable in the panel.
+			partyProgress.remove(event.getMemberId());
+			String key = memberKeyById.remove(event.getMemberId());
+			if (key != null && !key.isEmpty())
+			{
+				offeredKeys.remove(key);
+			}
+			publishStatus();
+		});
+	}
+
+	/**
+	 * Clears state that only means anything inside a party. Without this, leaving one group and
+	 * joining another leaves the first group's members listed and their un-approved offers in memory
+	 * for the rest of the session.
+	 */
+	private void prunePartyStateWhenAlone()
+	{
+		if (partyService.isInParty())
+		{
+			return;
+		}
+		if (!partyProgress.isEmpty() || !memberKeyById.isEmpty() || !offeredKeys.isEmpty())
+		{
+			partyProgress.clear();
+			memberKeyById.clear();
+			offeredKeys.clear();
+		}
 	}
 
 	private boolean isLocalMember(long memberId)
@@ -544,7 +648,13 @@ public class TcgLockedPlugin extends Plugin
 		message.setCardsOwned(current[0]);
 		message.setUnlocked(current[1]);
 		message.setSeen(current[2]);
-		message.setOwnedKeys(new HashSet<>(ownedNormalized));
+		// Counts always go out so the party list works for everyone. The collection goes out as soon
+		// as anyone here is approved, addressed to exactly those people: a party message cannot skip
+		// a recipient, so the payload names who it is for and everyone else ignores it. That lets you
+		// share with the people you have synced without waiting on someone who is still undecided.
+		Set<String> audience = approvedMembersPresent();
+		message.setSharedWith(audience);
+		message.setOwnedKeys(audience.isEmpty() ? null : new HashSet<>(ownedNormalized));
 		partyService.send(message);
 	}
 
@@ -776,6 +886,8 @@ public class TcgLockedPlugin extends Plugin
 		{
 			seenProfileKey = profileKey;
 			loadSeenItems();
+			poolConsent.load(profileKey);
+			loadPooledPartners();
 		}
 
 		// Read the "is it known" flag BEFORE the set: if a payload lands between the two reads this
@@ -838,6 +950,9 @@ public class TcgLockedPlugin extends Plugin
 			previousOwned.addAll(owned);
 		}
 
+		reportCollectionState(collectionKnown, owned.size());
+		reportPoolPending();
+
 		recomputeEquippedViolations(client.getItemContainer(InventoryID.WORN));
 		recomputeLockedInBag(client.getItemContainer(InventoryID.INV));
 		publishStatus();
@@ -877,26 +992,116 @@ public class TcgLockedPlugin extends Plugin
 		publishStatus();
 	}
 
+	/**
+	 * Says once per session whether the challenge is actually running. Without this, an OSRS TCG that
+	 * never answered looks identical to a plugin that has stopped working: everything stays usable
+	 * and the only clue is one line in a panel the player may not have open.
+	 */
+	private void reportCollectionState(boolean collectionKnown, int cardsOwned)
+	{
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+		if (!collectionKnown)
+		{
+			if (!saidNoCollection)
+			{
+				saidNoCollection = true;
+				chat("No collection from OSRS TCG yet, so nothing is locked. Check that the OSRS TCG "
+					+ "plugin is enabled and has loaded your cards.");
+			}
+			return;
+		}
+		if (!saidCollectionLoaded)
+		{
+			saidCollectionLoaded = true;
+			// Worth saying even after a "no collection" line: it is the correction to it.
+			chat("Collection loaded: " + cardsOwned + (cardsOwned == 1 ? " card" : " cards")
+				+ ". Locking is active.");
+		}
+	}
+
+	/** Tells the player a party member is waiting on a pooling decision they can only see in the panel. */
+	private void reportPoolPending()
+	{
+		if (!config.partyShare() || !partyService.isInParty() || client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+		List<PartyMember> members = partyService.getMembers();
+		if (members == null)
+		{
+			return;
+		}
+		PartyMember local = partyService.getLocalMember();
+		long localId = local != null ? local.getMemberId() : -1L;
+		for (PartyMember member : members)
+		{
+			String name = member.getDisplayName();
+			String key = TcgLockedPoolConsent.key(name);
+			if (member.getMemberId() == localId || key.isEmpty()
+				|| poolConsent.decisionFor(name) != TcgLockedPoolConsent.Decision.PENDING
+				|| !saidPoolPending.add(key))
+			{
+				continue;
+			}
+			chat(name.trim() + " is in your party. Open the TCG Locked panel to choose whether to pool "
+				+ "unlocks with them; until then nothing is shared either way.");
+		}
+	}
+
+	private void chat(String message)
+	{
+		client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "[TCG Locked] " + message, null);
+	}
+
 	private void publishStatus()
 	{
 		lastUpdatedMs = System.currentTimeMillis();
+		prunePartyStateWhenAlone();
 
 		List<TcgLockedStatus.LockItem> all = new ArrayList<>(seenItemIds.size());
 		int unlocked = 0;
+		int pooled = 0;
+		// How many seen items each partner opens on their own, so the group view can show what each
+		// person is actually contributing rather than just that they are connected.
+		Map<String, Integer> contributions = new HashMap<>();
 		for (int id : seenItemIds)
 		{
-			boolean locked = !isUnlocked(id);
+			TcgLockedStatus.UnlockSource source = unlockSourceFor(id);
+			boolean locked = source == TcgLockedStatus.UnlockSource.LOCKED;
 			if (!locked)
 			{
 				unlocked++;
 			}
+			List<String> unlockedBy = Collections.emptyList();
+			if (source == TcgLockedStatus.UnlockSource.POOLED)
+			{
+				pooled++;
+				unlockedBy = partnersUnlocking(TcgItemNameNormalizer.normalize(itemName(id)));
+				for (String partner : unlockedBy)
+				{
+					contributions.merge(partner, 1, Integer::sum);
+				}
+			}
 			String name = itemName(id);
-			all.add(new TcgLockedStatus.LockItem(id, name.isEmpty() ? "Item" : name, locked));
+			all.add(new TcgLockedStatus.LockItem(
+				id, name.isEmpty() ? "Item" : name, locked, source, unlockedBy));
 		}
 		all.sort(Comparator.comparing(li -> li.name.toLowerCase(Locale.ROOT)));
 		List<TcgLockedStatus.LockItem> lockItems = all.size() > LOCKBOOK_CAP
 			? new ArrayList<>(all.subList(0, LOCKBOOK_CAP))
 			: all;
+
+		Set<String> pooledCardKeys = new HashSet<>();
+		for (Set<String> keys : pooledKeys.values())
+		{
+			if (keys != null)
+			{
+				pooledCardKeys.addAll(keys);
+			}
+		}
 
 		TcgLockedStatus status = new TcgLockedStatus(
 			isCollectionLoaded(),
@@ -909,7 +1114,10 @@ public class TcgLockedPlugin extends Plugin
 			lockItems,
 			seenItemIds.size(),
 			unlocked,
-			buildPartyEntries(unlocked),
+			pooled,
+			pooledCardKeys.size(),
+			sharingBlockedBy(),
+			buildPartyEntries(unlocked, contributions),
 			lastUpdatedMs);
 		SwingUtilities.invokeLater(() -> panel.update(status));
 
@@ -917,46 +1125,106 @@ public class TcgLockedPlugin extends Plugin
 		shareUnlocksWithBronzeman();
 	}
 
-	private List<TcgLockedStatus.PartyEntry> buildPartyEntries(int localUnlocked)
+	/**
+	 * Rows for the panel's party section: everyone currently in the party, plus any synced partner
+	 * who is not — their cards still apply, so they must remain revocable without having to get back
+	 * into a party with them first.
+	 */
+	private List<TcgLockedStatus.PartyEntry> buildPartyEntries(int localUnlocked,
+		Map<String, Integer> contributions)
 	{
-		if (!config.partyShare() || !partyService.isInParty())
+		if (!config.partyShare())
 		{
 			return Collections.emptyList();
 		}
-		List<PartyMember> members = partyService.getMembers();
-		if (members == null || members.isEmpty())
-		{
-			return Collections.emptyList();
-		}
+		List<PartyMember> members = partyService.isInParty() ? partyService.getMembers() : null;
 		PartyMember local = partyService.getLocalMember();
 		long localId = local != null ? local.getMemberId() : -1L;
 
-		Set<Long> live = new HashSet<>();
-		for (PartyMember m : members)
-		{
-			live.add(m.getMemberId());
-		}
-		partyProgress.keySet().retainAll(live);
-		partyOwnedKeys.keySet().retainAll(live);
-
 		List<TcgLockedStatus.PartyEntry> out = new ArrayList<>();
-		for (PartyMember m : members)
+		Set<String> listed = new HashSet<>();
+		if (members != null)
 		{
-			String name = m.getDisplayName() != null && !m.getDisplayName().trim().isEmpty()
-				? m.getDisplayName().trim() : "Member";
-			if (m.getMemberId() == localId)
+			Set<Long> live = new HashSet<>();
+			for (PartyMember m : members)
 			{
-				out.add(new TcgLockedStatus.PartyEntry(name, ownedLower.size(), localUnlocked, seenItemIds.size(), true));
+				live.add(m.getMemberId());
 			}
-			else
+			partyProgress.keySet().retainAll(live);
+			memberKeyById.keySet().retainAll(live);
+
+			for (PartyMember m : members)
 			{
+				String key = rememberMemberKey(m);
+				boolean isLocal = m.getMemberId() == localId;
+				if (!key.isEmpty())
+				{
+					listed.add(key);
+				}
+				String name = displayNameFor(m, key);
+				if (isLocal)
+				{
+					out.add(new TcgLockedStatus.PartyEntry(name, ownedLower.size(), localUnlocked,
+						seenItemIds.size(), true, TcgLockedPoolConsent.Decision.APPROVED, true, false,
+						ownedNormalized.size(), 0));
+					continue;
+				}
 				int[] p = partyProgress.get(m.getMemberId());
+				// Nobody to save a decision against until their client reports a name, so no prompt
+				// is offered for them yet rather than one that could not be acted on.
+				TcgLockedPoolConsent.Decision consent = poolConsent.decisionFor(name);
+				int shared = sharedCardCount(key);
+				int gives = contributions.getOrDefault(key, 0);
 				out.add(p != null
-					? new TcgLockedStatus.PartyEntry(name, p[0], p[1], p[2], false)
-					: new TcgLockedStatus.PartyEntry(name, -1, -1, -1, false));
+					? new TcgLockedStatus.PartyEntry(name, p[0], p[1], p[2], false, consent, true,
+						!key.isEmpty(), shared, gives)
+					: new TcgLockedStatus.PartyEntry(name, -1, -1, -1, false, consent, true,
+						!key.isEmpty(), shared, gives));
 			}
+		}
+
+		// Everyone you have approved, not merely those whose cards we happen to be holding. A partner
+		// you synced with but never received a collection from (they were not running the plugin, or
+		// had nothing to send yet) would otherwise vanish from the panel the moment you restart, even
+		// though the approval is remembered — which reads as the group being forgotten.
+		Set<String> saved = new TreeSet<>(poolConsent.approvedKeys());
+		saved.addAll(pooledKeys.keySet());
+		for (String partnerKey : saved)
+		{
+			if (listed.contains(partnerKey))
+			{
+				continue;
+			}
+			out.add(new TcgLockedStatus.PartyEntry(partnerKey, -1, -1, -1, false,
+				TcgLockedPoolConsent.Decision.APPROVED, false, true,
+				sharedCardCount(partnerKey), contributions.getOrDefault(partnerKey, 0)));
 		}
 		return out;
+	}
+
+	/**
+	 * @return the stable name key for a member, remembering it the first time their client reports
+	 * one so a later {@code <unknown>} (or a rejoin under a new id) still resolves to the same person.
+	 */
+	private String rememberMemberKey(PartyMember member)
+	{
+		String key = TcgLockedPoolConsent.key(member.getDisplayName());
+		if (!key.isEmpty())
+		{
+			memberKeyById.put(member.getMemberId(), key);
+			return key;
+		}
+		return memberKeyById.getOrDefault(member.getMemberId(), "");
+	}
+
+	private static String displayNameFor(PartyMember member, String key)
+	{
+		String name = member.getDisplayName();
+		if (name != null && !name.trim().isEmpty() && !"<unknown>".equalsIgnoreCase(name.trim()))
+		{
+			return name.trim();
+		}
+		return key.isEmpty() ? "Member" : key;
 	}
 
 	private String enforcementLabel()
@@ -1087,56 +1355,105 @@ public class TcgLockedPlugin extends Plugin
 	 */
 	boolean isUnlocked(int itemId)
 	{
+		return unlockSourceFor(itemId) != TcgLockedStatus.UnlockSource.LOCKED;
+	}
+
+	/**
+	 * The same decision {@link #isUnlocked(int)} makes, but reporting WHY. A player needs to be able
+	 * to tell their own progress apart from what a group member is lending them — otherwise a pooled
+	 * collection quietly reads as their own.
+	 *
+	 * <p>Order matters: owning the card yourself always wins over the group, so your own progress is
+	 * never attributed to someone else.</p>
+	 */
+	TcgLockedStatus.UnlockSource unlockSourceFor(int itemId)
+	{
 		if (!collectionReader.hasCollection())
 		{
 			// The TCG plugin hasn't told us the collection yet (not installed, not started, or still
 			// answering). Locking now would make every item unusable for reasons the player can't
 			// act on, so nothing is locked until we actually know what they own.
-			return true;
+			return TcgLockedStatus.UnlockSource.SUSPENDED;
 		}
 		int canonical = itemManager.canonicalize(itemId);
 		String name = itemName(canonical);
 		if (name.isEmpty())
 		{
 			// Unknown item name: don't lock the player out of something we can't identify.
-			return true;
+			return TcgLockedStatus.UnlockSource.UNCARDED;
 		}
 		if (ownedLower.contains(name.toLowerCase(Locale.ROOT)))
 		{
-			return true;
+			return TcgLockedStatus.UnlockSource.OWNED;
 		}
 		String key = TcgItemNameNormalizer.normalize(name);
 		if (key.isEmpty())
 		{
-			return true;
+			return TcgLockedStatus.UnlockSource.UNCARDED;
 		}
-		if (ownedNormalized.contains(key) || extraAllowNormalized.contains(key) || unlockedByParty(key))
+		if (ownedNormalized.contains(key))
 		{
-			return true;
+			return TcgLockedStatus.UnlockSource.OWNED;
+		}
+		if (extraAllowNormalized.contains(key))
+		{
+			return TcgLockedStatus.UnlockSource.EXEMPT;
+		}
+		if (unlockedByParty(key))
+		{
+			return TcgLockedStatus.UnlockSource.POOLED;
 		}
 		if (config.unlockStarterGear() && key.startsWith("bronze "))
 		{
-			return true;
+			return TcgLockedStatus.UnlockSource.EXEMPT;
 		}
 		// No card exists for this item, so it is outside the challenge — the same rule monster gating
 		// uses. Locking it would be permanent: there would be nothing the player could ever collect
 		// to open it up. If normalization failed to match a card that does exist we land here too,
 		// which errs towards letting the item through rather than towards a dead end.
-		return !cardCatalog.hasItemCard(key);
+		return cardCatalog.hasItemCard(key)
+			? TcgLockedStatus.UnlockSource.LOCKED : TcgLockedStatus.UnlockSource.UNCARDED;
+	}
+
+	/** @return how many cards this partner currently has in your pool; 0 if they aren't synced. */
+	private int sharedCardCount(String partnerKey)
+	{
+		Set<String> keys = pooledKeys.get(partnerKey);
+		return keys == null ? 0 : keys.size();
+	}
+
+	/** @return the synced partners whose cards unlock this item, for the panel's group view. */
+	private List<String> partnersUnlocking(String key)
+	{
+		if (!config.partyShare() || key.isEmpty())
+		{
+			return Collections.emptyList();
+		}
+		List<String> names = new ArrayList<>();
+		for (Map.Entry<String, Set<String>> entry : pooledKeys.entrySet())
+		{
+			Set<String> keys = entry.getValue();
+			if (keys != null && keys.contains(key))
+			{
+				names.add(entry.getKey());
+			}
+		}
+		return names;
 	}
 
 	/**
-	 * Offers the party's pooled cards to Bronzeman TCG, which enforces the same locks from its own
-	 * copy of the collection. Without this, pooled unlocks do nothing whenever that plugin is
-	 * running: it blocks the item regardless of what we decide, so group play quietly stops working.
-	 * Only the pooled extras are sent — the player's own cards it already has.
+	 * Offers the pooled cards to Bronzeman TCG, which enforces the same locks from its own copy of
+	 * the collection. Without this, pooled unlocks do nothing whenever that plugin is running: it
+	 * blocks the item regardless of what we decide, so group play quietly stops working. Only cards
+	 * from partners the player approved are sent, and only the pooled extras — their own collection
+	 * it already has.
 	 */
 	private void shareUnlocksWithBronzeman()
 	{
 		Set<String> pooled = new HashSet<>();
 		if (config.partyShare())
 		{
-			for (Set<String> keys : partyOwnedKeys.values())
+			for (Set<String> keys : pooledKeys.values())
 			{
 				if (keys != null)
 				{
@@ -1157,14 +1474,19 @@ public class TcgLockedPlugin extends Plugin
 			BRONZEMAN_API_NAMESPACE, BRONZEMAN_SHARED_UNLOCKS, data));
 	}
 
-	/** @return true if any party member owns a card for this key (pooled unlocks). */
+	/**
+	 * @return true if a player you have approved owns a card for this key (pooled unlocks). The
+	 * party is only how collections are exchanged, not how long they last: an approved partner's
+	 * cards keep applying after you leave, and are refreshed the next time you are in a party
+	 * together.
+	 */
 	private boolean unlockedByParty(String key)
 	{
 		if (!config.partyShare())
 		{
 			return false;
 		}
-		for (Set<String> keys : partyOwnedKeys.values())
+		for (Set<String> keys : pooledKeys.values())
 		{
 			if (keys != null && keys.contains(key))
 			{
@@ -1172,6 +1494,278 @@ public class TcgLockedPlugin extends Plugin
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * @return the people you could sync with, listed only while you have synced nobody here — at
+	 * that point nothing of yours is going out at all. Once anyone is approved your collection is
+	 * shared with them, so an undecided third party is no longer holding anything up.
+	 */
+	private List<String> sharingBlockedBy()
+	{
+		if (!config.partyShare() || !partyService.isInParty() || !approvedMembersPresent().isEmpty())
+		{
+			return Collections.emptyList();
+		}
+		List<PartyMember> members = partyService.getMembers();
+		if (members == null)
+		{
+			return Collections.emptyList();
+		}
+		PartyMember local = partyService.getLocalMember();
+		long localId = local != null ? local.getMemberId() : -1L;
+		List<String> blocking = new ArrayList<>();
+		for (PartyMember member : members)
+		{
+			if (member.getMemberId() != localId && !poolConsent.isApproved(member.getDisplayName()))
+			{
+				String key = rememberMemberKey(member);
+				blocking.add(displayNameFor(member, key));
+			}
+		}
+		return blocking;
+	}
+
+	/**
+	 * @return true if a shared collection was meant for us. An absent list means an older build that
+	 * predates addressing; those shared with the whole party, so treat it as addressed to us and let
+	 * our own consent decide.
+	 */
+	private boolean addressedToUs(Set<String> sharedWith)
+	{
+		if (sharedWith == null)
+		{
+			return true;
+		}
+		String localName = client.getLocalPlayer() == null ? null : client.getLocalPlayer().getName();
+		String me = TcgLockedPoolConsent.key(localName);
+		return !me.isEmpty() && sharedWith.contains(me);
+	}
+
+	/** @return the present members you have approved — who your collection is addressed to. */
+	private Set<String> approvedMembersPresent()
+	{
+		if (!config.partyShare() || !partyService.isInParty())
+		{
+			return Collections.emptySet();
+		}
+		List<PartyMember> members = partyService.getMembers();
+		if (members == null)
+		{
+			return Collections.emptySet();
+		}
+		PartyMember local = partyService.getLocalMember();
+		long localId = local != null ? local.getMemberId() : -1L;
+		Set<String> audience = new HashSet<>();
+		for (PartyMember member : members)
+		{
+			if (member.getMemberId() != localId && poolConsent.isApproved(member.getDisplayName()))
+			{
+				String key = rememberMemberKey(member);
+				if (!key.isEmpty())
+				{
+					audience.add(key);
+				}
+			}
+		}
+		return audience;
+	}
+
+	/** Approve or revoke pooling with a player, from the panel. Revoking drops their cards at once. */
+	private void setPoolConsent(String displayName, boolean approved)
+	{
+		String key = TcgLockedPoolConsent.key(displayName);
+		if (key.isEmpty())
+		{
+			return;
+		}
+		clientThread.invokeLater(() ->
+		{
+			if (approved)
+			{
+				poolConsent.approve(displayName);
+				// Their collection may already be in hand from a broadcast we received but did not
+				// apply, so approving takes effect immediately rather than waiting for the next one.
+				Set<String> offered = offeredKeys.get(key);
+				if (offered != null)
+				{
+					pooledKeys.put(key, offered);
+					savePooledPartner(key, offered);
+				}
+			}
+			else
+			{
+				poolConsent.decline(displayName);
+				pooledKeys.remove(key);
+				forgetPooledPartner(key);
+				// Ask them to drop what we shared. Without this, unsyncing only stops future updates:
+				// they keep everything already sent, saved to disk, indefinitely.
+				sendWithdraw(key);
+			}
+			// Our own keys only go out once everyone present is approved, so a decision changes what
+			// we broadcast as well as what we apply.
+			broadcastProgress(true);
+			refreshOwned();
+		});
+	}
+
+	/** Re-asserts the withdrawal against every declined player currently in the party. */
+	private void withdrawFromDeclinedMembers()
+	{
+		if (!partyService.isInParty())
+		{
+			return;
+		}
+		List<PartyMember> members = partyService.getMembers();
+		if (members == null)
+		{
+			return;
+		}
+		PartyMember local = partyService.getLocalMember();
+		long localId = local != null ? local.getMemberId() : -1L;
+		for (PartyMember member : members)
+		{
+			if (member.getMemberId() == localId)
+			{
+				continue;
+			}
+			String key = rememberMemberKey(member);
+			if (!key.isEmpty()
+				&& poolConsent.decisionFor(member.getDisplayName()) == TcgLockedPoolConsent.Decision.DECLINED)
+			{
+				sendWithdraw(key);
+			}
+		}
+	}
+
+	/** Tells a player to stop using our cards. Harmless if they aren't listening or already dropped them. */
+	private void sendWithdraw(String partnerKey)
+	{
+		if (partnerKey.isEmpty() || !partyService.isInParty())
+		{
+			return;
+		}
+		TcgLockedPartyWithdrawMessage message = new TcgLockedPartyWithdrawMessage();
+		message.setTarget(partnerKey);
+		partyService.send(message);
+	}
+
+	@Subscribe
+	public void onTcgLockedPartyWithdrawMessage(TcgLockedPartyWithdrawMessage message)
+	{
+		if (message != null)
+		{
+			clientThread.invokeLater(() -> handlePartyWithdraw(message));
+		}
+	}
+
+	/**
+	 * Someone has withdrawn our access to their cards. Drop their collection and forget it, exactly
+	 * as if we had unsynced them ourselves — but leave our consent decision alone, so if they share
+	 * again later it applies without having to be re-approved.
+	 */
+	private void handlePartyWithdraw(TcgLockedPartyWithdrawMessage message)
+	{
+		if (isLocalMember(message.getMemberId()))
+		{
+			return;
+		}
+		String localName = client.getLocalPlayer() == null ? null : client.getLocalPlayer().getName();
+		String me = TcgLockedPoolConsent.key(localName);
+		if (me.isEmpty() || !me.equals(TcgLockedPoolConsent.key(message.getTarget())))
+		{
+			// Addressed to someone else in the party; party messages reach everyone.
+			return;
+		}
+		PartyMember from = partyService.getMemberById(message.getMemberId());
+		String senderKey = from == null ? "" : rememberMemberKey(from);
+		if (senderKey.isEmpty())
+		{
+			return;
+		}
+		boolean had = pooledKeys.remove(senderKey) != null;
+		offeredKeys.remove(senderKey);
+		forgetPooledPartner(senderKey);
+		if (had)
+		{
+			chat(from.getDisplayName().trim() + " stopped sharing their cards with you.");
+			refreshOwned();
+		}
+	}
+
+	/** Stores an approved partner's collection as a packed bitmap under their name. */
+	private void savePooledPartner(String partnerKey, Set<String> keys)
+	{
+		String packed = cardCatalog.packKeys(keys);
+		if (packed.isEmpty())
+		{
+			forgetPooledPartner(partnerKey);
+			return;
+		}
+		configManager.setRSProfileConfiguration(TcgLockedConfig.GROUP, pooledConfigKey(partnerKey), packed);
+		Set<String> names = new java.util.LinkedHashSet<>(readPooledPartnerNames());
+		if (names.add(partnerKey))
+		{
+			configManager.setRSProfileConfiguration(
+				TcgLockedConfig.GROUP, POOLED_PARTNERS_KEY, String.join(",", names));
+		}
+	}
+
+	private void forgetPooledPartner(String partnerKey)
+	{
+		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, pooledConfigKey(partnerKey));
+		Set<String> names = new java.util.LinkedHashSet<>(readPooledPartnerNames());
+		if (names.remove(partnerKey))
+		{
+			configManager.setRSProfileConfiguration(
+				TcgLockedConfig.GROUP, POOLED_PARTNERS_KEY, String.join(",", names));
+		}
+	}
+
+	/** Restores approved partners' collections so their unlocks survive a restart. */
+	private void loadPooledPartners()
+	{
+		pooledKeys.clear();
+		for (String partnerKey : readPooledPartnerNames())
+		{
+			if (!poolConsent.isApproved(partnerKey))
+			{
+				// Approval was revoked while their blob lingered; drop it rather than honour it.
+				forgetPooledPartner(partnerKey);
+				continue;
+			}
+			String packed = configManager.getRSProfileConfiguration(
+				TcgLockedConfig.GROUP, pooledConfigKey(partnerKey));
+			Set<String> keys = cardCatalog.unpackKeys(packed);
+			if (!keys.isEmpty())
+			{
+				pooledKeys.put(partnerKey, keys);
+			}
+		}
+	}
+
+	private List<String> readPooledPartnerNames()
+	{
+		String csv = configManager.getRSProfileConfiguration(TcgLockedConfig.GROUP, POOLED_PARTNERS_KEY);
+		if (csv == null || csv.trim().isEmpty())
+		{
+			return Collections.emptyList();
+		}
+		List<String> names = new ArrayList<>();
+		for (String part : csv.split(","))
+		{
+			String key = TcgLockedPoolConsent.key(part);
+			if (!key.isEmpty())
+			{
+				names.add(key);
+			}
+		}
+		return names;
+	}
+
+	private static String pooledConfigKey(String partnerKey)
+	{
+		return POOLED_PREFIX + partnerKey.replace(' ', '_');
 	}
 
 	private String itemName(int itemId)

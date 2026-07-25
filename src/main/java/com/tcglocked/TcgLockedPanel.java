@@ -20,6 +20,7 @@ import java.awt.BasicStroke;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
+import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
@@ -29,6 +30,7 @@ import java.awt.geom.Ellipse2D;
 import java.awt.geom.GeneralPath;
 import java.awt.image.BufferedImage;
 import java.util.List;
+import java.util.function.BiConsumer;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import javax.swing.BorderFactory;
@@ -63,6 +65,8 @@ class TcgLockedPanel extends PluginPanel
 	private static final Color MUTED = ColorScheme.LIGHT_GRAY_COLOR;
 	private static final Color FAINT = new Color(0x8A, 0x8A, 0x8A);
 	private static final Color LOCK_RED = new Color(0xD0, 0x5B, 0x5B);
+	/** Group blue: everything borrowed from a partner is this colour, never the gold of your own progress. */
+	private static final Color GROUP_BLUE = new Color(0x5B, 0x9B, 0xD5);
 	private static final int MAX_RECENT_ROWS = 8;
 	private static final int MAX_BAG_ROWS = 10;
 	private static final int LOCKBOOK_GRID_CAP = 150;
@@ -72,12 +76,14 @@ class TcgLockedPanel extends PluginPanel
 
 	private enum LockFilter
 	{
-		ALL, UNLOCKED, LOCKED
+		ALL, UNLOCKED, LOCKED, GROUP
 	}
 
 	private final ItemManager itemManager;
 	private final JPanel body = new JPanel();
 	private Runnable refreshAction = TcgLockedPanel::noop;
+	/** (player name, approved) — set by the plugin so the pooling controls can act. */
+	private BiConsumer<String, Boolean> consentAction = TcgLockedPanel::noConsent;
 	private LockFilter filter = LockFilter.ALL;
 	private TcgLockedStatus lastStatus = emptyStatus();
 
@@ -92,6 +98,12 @@ class TcgLockedPanel extends PluginPanel
 		body.setLayout(new BoxLayout(body, BoxLayout.Y_AXIS));
 		add(body, BorderLayout.NORTH);
 
+		// PluginPanel wraps us in a JScrollPane and never clears its default border, which draws a
+		// pale line around the whole panel once the content is tall enough for it to engage.
+		getScrollPane().setBorder(null);
+		getScrollPane().setBackground(ColorScheme.DARK_GRAY_COLOR);
+		getScrollPane().getViewport().setBackground(ColorScheme.DARK_GRAY_COLOR);
+
 		render(lastStatus);
 	}
 
@@ -100,7 +112,16 @@ class TcgLockedPanel extends PluginPanel
 		this.refreshAction = action == null ? TcgLockedPanel::noop : action;
 	}
 
+	void setConsentAction(BiConsumer<String, Boolean> action)
+	{
+		this.consentAction = action == null ? TcgLockedPanel::noConsent : action;
+	}
+
 	private static void noop()
+	{
+	}
+
+	private static void noConsent(String playerName, boolean approved)
 	{
 	}
 
@@ -133,7 +154,7 @@ class TcgLockedPanel extends PluginPanel
 		if (!status.party.isEmpty())
 		{
 			body.add(vGap(12));
-			body.add(section("Party", buildParty(status)));
+			body.add(section("Group", buildParty(status), GROUP_BLUE));
 		}
 		body.add(vGap(12));
 		body.add(buildFooter(status));
@@ -142,26 +163,170 @@ class TcgLockedPanel extends PluginPanel
 	private JPanel buildParty(TcgLockedStatus status)
 	{
 		JPanel list = vBox();
+
+		if (!status.sharingBlockedBy.isEmpty())
+		{
+			// Nothing of theirs and nothing of yours moves until at least one person is synced.
+			String who = String.join(", ", status.sharingBlockedBy);
+			JLabel blocked = new JLabel("<html>Not sharing yet &mdash; sync " + who
+				+ " to pool cards</html>");
+			blocked.setFont(FontManager.getRunescapeSmallFont());
+			blocked.setForeground(GOLD);
+			blocked.setToolTipText("Your collection is only sent to people you have synced with. "
+				+ "Sync someone here and it starts flowing both ways.");
+			blocked.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
+			blocked.setAlignmentX(Component.LEFT_ALIGNMENT);
+			list.add(blocked);
+		}
+
+		if (status.pooledCards > 0)
+		{
+			// The headline answer to "what is my group actually giving me?"
+			JLabel summary = new JLabel(status.pooledCards + " cards pooled in, opening "
+				+ status.lockbookPooled + " of your items");
+			summary.setFont(FontManager.getRunescapeSmallFont());
+			summary.setForeground(GROUP_BLUE);
+			summary.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
+			summary.setAlignmentX(Component.LEFT_ALIGNMENT);
+			list.add(summary);
+		}
+
 		for (TcgLockedStatus.PartyEntry e : status.party)
 		{
 			JPanel r = new JPanel(new BorderLayout(6, 0));
 			r.setBackground(ColorScheme.DARK_GRAY_COLOR);
 			r.setBorder(BorderFactory.createEmptyBorder(2, 0, 2, 0));
 
-			JLabel name = new JLabel(e.local ? e.name + " (you)" : e.name);
+			String suffix = e.local ? " (you)" : e.present ? "" : " (away)";
+			JLabel name = new JLabel(e.name + suffix);
 			name.setFont(FontManager.getRunescapeSmallFont());
-			name.setForeground(e.local ? GOLD : INK);
+			name.setForeground(e.local ? GOLD
+				: e.consent == TcgLockedPoolConsent.Decision.APPROVED ? GROUP_BLUE : INK);
 
+			r.add(name, BorderLayout.CENTER);
+			r.add(partyRowEast(e), BorderLayout.EAST);
+			list.add(r);
+
+			if (!e.local && e.consent == TcgLockedPoolConsent.Decision.APPROVED)
+			{
+				list.add(sharingLine(e));
+			}
+			if (!e.local && e.decidable && e.consent == TcgLockedPoolConsent.Decision.PENDING)
+			{
+				list.add(poolPrompt(e.name));
+			}
+		}
+		return list;
+	}
+
+	/** What one synced partner is contributing: cards lent, and how many of your items only they open. */
+	private JPanel sharingLine(TcgLockedStatus.PartyEntry e)
+	{
+		JPanel row = new JPanel(new BorderLayout(6, 0));
+		row.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		row.setBorder(BorderFactory.createEmptyBorder(0, 8, 3, 0));
+
+		// A partner you approved but have never received cards from is still a group member; saying
+		// "no cards yet" is the truth, where showing nothing at all looks like they were forgotten.
+		JLabel detail = new JLabel(e.sharedCards > 0
+			? e.sharedCards + " cards shared"
+			: e.present ? "waiting for their cards" : "no cards yet");
+		detail.setFont(FontManager.getRunescapeSmallFont());
+		detail.setForeground(FAINT);
+
+		JLabel gives = new JLabel(e.contributes > 0 ? "opens " + e.contributes : "opens nothing new");
+		gives.setFont(FontManager.getRunescapeSmallFont());
+		gives.setForeground(e.contributes > 0 ? GROUP_BLUE : FAINT);
+		// Deliberately not "only they open": several partners can share the same card, and each is
+		// credited, so claiming exclusivity here would sometimes be a lie.
+		gives.setToolTipText(e.contributes > 0
+			? e.contributes + " items you have seen are opened by " + e.name + "'s cards"
+			: e.name + " shares cards, but none of them open anything you have seen");
+
+		row.add(detail, BorderLayout.CENTER);
+		row.add(gives, BorderLayout.EAST);
+		return row;
+	}
+
+	/** Progress for anyone settled; for a pending member the progress is replaced by the prompt below. */
+	private JComponent partyRowEast(TcgLockedStatus.PartyEntry e)
+	{
+		if (e.local || !e.decidable || e.consent == TcgLockedPoolConsent.Decision.PENDING)
+		{
 			JLabel prog = new JLabel(e.unlocked < 0 ? "…" : e.unlocked + " / " + e.seen);
 			prog.setFont(FontManager.getRunescapeSmallFont());
 			prog.setForeground(FAINT);
-			prog.setHorizontalAlignment(SwingConstants.RIGHT);
-
-			r.add(name, BorderLayout.CENTER);
-			r.add(prog, BorderLayout.EAST);
-			list.add(r);
+			return prog;
 		}
-		return list;
+
+		JPanel east = new JPanel(new BorderLayout(4, 0));
+		east.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		JLabel prog = new JLabel(e.unlocked < 0 ? "…" : e.unlocked + " / " + e.seen);
+		prog.setFont(FontManager.getRunescapeSmallFont());
+		prog.setForeground(FAINT);
+		east.add(prog, BorderLayout.CENTER);
+
+		boolean pooling = e.consent == TcgLockedPoolConsent.Decision.APPROVED;
+		east.add(linkButton(pooling ? "unsync" : "sync",
+			pooling ? LOCK_RED : ColorScheme.PROGRESS_COMPLETE_COLOR,
+			pooling ? "Stop pooling cards with " + e.name : "Pool cards with " + e.name,
+			() -> consentAction.accept(e.name, !pooling)), BorderLayout.EAST);
+		return east;
+	}
+
+	/** The join prompt: nothing pools until this is answered, and ignoring it stays safe. */
+	private JPanel poolPrompt(String playerName)
+	{
+		JPanel row = new JPanel(new BorderLayout(6, 0));
+		row.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		row.setBorder(BorderFactory.createEmptyBorder(0, 8, 4, 0));
+
+		JLabel ask = new JLabel("Pool unlocks?");
+		ask.setFont(FontManager.getRunescapeSmallFont());
+		ask.setForeground(GOLD);
+
+		JPanel actions = new JPanel(new BorderLayout(6, 0));
+		actions.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		actions.add(linkButton("yes", ColorScheme.PROGRESS_COMPLETE_COLOR,
+			"Share cards with " + playerName + " and use theirs",
+			() -> consentAction.accept(playerName, true)), BorderLayout.CENTER);
+		actions.add(linkButton("no", LOCK_RED,
+			"Never pool with " + playerName,
+			() -> consentAction.accept(playerName, false)), BorderLayout.EAST);
+
+		row.add(ask, BorderLayout.CENTER);
+		row.add(actions, BorderLayout.EAST);
+		return row;
+	}
+
+	private JLabel linkButton(String text, Color color, String tooltip, Runnable onClick)
+	{
+		JLabel label = new JLabel(text);
+		label.setFont(FontManager.getRunescapeSmallFont());
+		label.setForeground(color);
+		label.setToolTipText(tooltip);
+		label.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+		label.addMouseListener(new MouseInputAdapter()
+		{
+			@Override
+			public void mouseClicked(java.awt.event.MouseEvent e)
+			{
+				onClick.run();
+			}
+
+			@Override
+			public void mouseEntered(java.awt.event.MouseEvent e)
+			{
+				label.setForeground(color.brighter());
+			}
+
+			@Override
+			public void mouseExited(java.awt.event.MouseEvent e)
+			{
+				label.setForeground(color);
+			}
+		});
+		return label;
 	}
 
 	// ---- header -----------------------------------------------------------------------------------------------
@@ -247,6 +412,17 @@ class TcgLockedPanel extends PluginPanel
 		progress.setAlignmentX(Component.LEFT_ALIGNMENT);
 		box.add(progress);
 
+		if (status.lockbookPooled > 0)
+		{
+			// Says plainly how much of that progress is borrowed rather than earned.
+			JLabel byGroup = new JLabel(status.lockbookPooled + " of those are unlocked by your group");
+			byGroup.setFont(FontManager.getRunescapeSmallFont());
+			byGroup.setForeground(GROUP_BLUE);
+			byGroup.setBorder(BorderFactory.createEmptyBorder(0, 0, 3, 0));
+			byGroup.setAlignmentX(Component.LEFT_ALIGNMENT);
+			box.add(byGroup);
+		}
+
 		ProgressBar bar = new ProgressBar(seen == 0 ? 0f : (float) unlocked / seen);
 		bar.setAlignmentX(Component.LEFT_ALIGNMENT);
 		box.add(bar);
@@ -267,14 +443,16 @@ class TcgLockedPanel extends PluginPanel
 			{
 				break;
 			}
-			String tip = li.name + (li.locked ? " (locked)" : "");
-			grid.add(new TcgLockedItemCell(itemManager, li.itemId, li.locked, tip));
+			String tip = li.name + lockNote(li);
+			grid.add(new TcgLockedItemCell(itemManager, li.itemId, li.locked,
+				li.source == TcgLockedStatus.UnlockSource.POOLED, tip));
 			shown++;
 		}
 
 		if (shown == 0)
 		{
-			box.add(emptyLine(filter == LockFilter.LOCKED ? "Nothing locked here." : "Nothing to show."));
+			box.add(emptyLine(filter == LockFilter.LOCKED ? "Nothing locked here."
+				: filter == LockFilter.GROUP ? "Nothing is unlocked by your group." : "Nothing to show."));
 			return box;
 		}
 
@@ -298,13 +476,14 @@ class TcgLockedPanel extends PluginPanel
 
 	private JPanel buildFilterRow()
 	{
-		JPanel row = new JPanel(new GridLayout(1, 3, 4, 0));
+		JPanel row = new JPanel(new GridLayout(1, 4, 4, 0));
 		row.setBackground(ColorScheme.DARK_GRAY_COLOR);
 		row.setAlignmentX(Component.LEFT_ALIGNMENT);
 		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 22));
 		row.add(filterButton("All", LockFilter.ALL));
 		row.add(filterButton("Unlocked", LockFilter.UNLOCKED));
 		row.add(filterButton("Locked", LockFilter.LOCKED));
+		row.add(filterButton("Group", LockFilter.GROUP));
 		return row;
 	}
 
@@ -325,6 +504,22 @@ class TcgLockedPanel extends PluginPanel
 		return button;
 	}
 
+	/** Tooltip suffix naming who an item is open through, so borrowed unlocks are never ambiguous. */
+	private static String lockNote(TcgLockedStatus.LockItem item)
+	{
+		if (item.locked)
+		{
+			return " (locked)";
+		}
+		if (item.source != TcgLockedStatus.UnlockSource.POOLED)
+		{
+			return "";
+		}
+		return item.unlockedBy.isEmpty()
+			? " (unlocked by your group)"
+			: " (unlocked by " + String.join(", ", item.unlockedBy) + ")";
+	}
+
 	private boolean passesFilter(TcgLockedStatus.LockItem item)
 	{
 		switch (filter)
@@ -333,6 +528,9 @@ class TcgLockedPanel extends PluginPanel
 				return !item.locked;
 			case LOCKED:
 				return item.locked;
+			case GROUP:
+				// Only what the group is lending you - the answer to "what am I actually borrowing?"
+				return item.source == TcgLockedStatus.UnlockSource.POOLED;
 			default:
 				return true;
 		}
@@ -575,7 +773,8 @@ class TcgLockedPanel extends PluginPanel
 
 	private static TcgLockedStatus emptyStatus()
 	{
-		return new TcgLockedStatus(false, 0, 0, "", List.of(), List.of(), List.of(), List.of(), 0, 0, List.of(), 0L);
+		return new TcgLockedStatus(
+			false, 0, 0, "", List.of(), List.of(), List.of(), List.of(), 0, 0, 0, 0, List.of(), List.of(), 0L);
 	}
 
 	private static String relativeTime(long thenMs, long nowMs)
