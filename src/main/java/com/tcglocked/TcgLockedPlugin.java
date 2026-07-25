@@ -521,10 +521,11 @@ public class TcgLockedPlugin extends Plugin
 		Set<String> sent = message.getOwnedKeys();
 		PartyMember from = partyService.getMemberById(message.getMemberId());
 		String partnerKey = from == null ? "" : rememberMemberKey(from);
-		if (sent != null && !partnerKey.isEmpty())
+		if (sent != null && !partnerKey.isEmpty() && addressedToUs(message.getSharedWith()))
 		{
-			// Keys arrive whether or not we asked for them — the party has no per-recipient send —
-			// so consent decides whether they count, not whether they were received.
+			// Keys reach the whole party — there is no per-recipient send — so two things gate them:
+			// the sender addressing us, and our own consent. Both must agree, which is what keeps
+			// sharing mutual rather than something either side can impose.
 			offeredKeys.put(partnerKey, sent);
 			if (poolConsent.isApproved(partnerKey))
 			{
@@ -647,10 +648,13 @@ public class TcgLockedPlugin extends Plugin
 		message.setCardsOwned(current[0]);
 		message.setUnlocked(current[1]);
 		message.setSeen(current[2]);
-		// Counts always go out so the party list works for everyone. The collection itself only goes
-		// out once every member present is approved: PartyService.send has no per-recipient form, so
-		// this is the only point at which declining someone can actually withhold anything.
-		message.setOwnedKeys(everyMemberApproved() ? new HashSet<>(ownedNormalized) : null);
+		// Counts always go out so the party list works for everyone. The collection goes out as soon
+		// as anyone here is approved, addressed to exactly those people: a party message cannot skip
+		// a recipient, so the payload names who it is for and everyone else ignores it. That lets you
+		// share with the people you have synced without waiting on someone who is still undecided.
+		Set<String> audience = approvedMembersPresent();
+		message.setSharedWith(audience);
+		message.setOwnedKeys(audience.isEmpty() ? null : new HashSet<>(ownedNormalized));
 		partyService.send(message);
 	}
 
@@ -1492,10 +1496,14 @@ public class TcgLockedPlugin extends Plugin
 		return false;
 	}
 
-	/** @return present members you haven't approved — the reason your cards aren't going out. */
+	/**
+	 * @return the people you could sync with, listed only while you have synced nobody here — at
+	 * that point nothing of yours is going out at all. Once anyone is approved your collection is
+	 * shared with them, so an undecided third party is no longer holding anything up.
+	 */
 	private List<String> sharingBlockedBy()
 	{
-		if (!config.partyShare() || !partyService.isInParty())
+		if (!config.partyShare() || !partyService.isInParty() || !approvedMembersPresent().isEmpty())
 		{
 			return Collections.emptyList();
 		}
@@ -1519,27 +1527,48 @@ public class TcgLockedPlugin extends Plugin
 	}
 
 	/**
-	 * @return true if every other member present has been approved. Pooling hands your whole
-	 * collection to the party at once and {@code PartyService.send} has no per-recipient form, so
-	 * one unapproved member means the keys stay on this client.
+	 * @return true if a shared collection was meant for us. An absent list means an older build that
+	 * predates addressing; those shared with the whole party, so treat it as addressed to us and let
+	 * our own consent decide.
 	 */
-	private boolean everyMemberApproved()
+	private boolean addressedToUs(Set<String> sharedWith)
 	{
-		PartyMember local = partyService.getLocalMember();
-		long localId = local != null ? local.getMemberId() : -1L;
+		if (sharedWith == null)
+		{
+			return true;
+		}
+		String localName = client.getLocalPlayer() == null ? null : client.getLocalPlayer().getName();
+		String me = TcgLockedPoolConsent.key(localName);
+		return !me.isEmpty() && sharedWith.contains(me);
+	}
+
+	/** @return the present members you have approved — who your collection is addressed to. */
+	private Set<String> approvedMembersPresent()
+	{
+		if (!config.partyShare() || !partyService.isInParty())
+		{
+			return Collections.emptySet();
+		}
 		List<PartyMember> members = partyService.getMembers();
 		if (members == null)
 		{
-			return false;
+			return Collections.emptySet();
 		}
+		PartyMember local = partyService.getLocalMember();
+		long localId = local != null ? local.getMemberId() : -1L;
+		Set<String> audience = new HashSet<>();
 		for (PartyMember member : members)
 		{
-			if (member.getMemberId() != localId && !poolConsent.isApproved(member.getDisplayName()))
+			if (member.getMemberId() != localId && poolConsent.isApproved(member.getDisplayName()))
 			{
-				return false;
+				String key = rememberMemberKey(member);
+				if (!key.isEmpty())
+				{
+					audience.add(key);
+				}
 			}
 		}
-		return true;
+		return audience;
 	}
 
 	/** Approve or revoke pooling with a player, from the panel. Revoking drops their cards at once. */

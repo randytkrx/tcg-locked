@@ -166,15 +166,14 @@ class TcgLockedPanel extends PluginPanel
 
 		if (!status.sharingBlockedBy.isEmpty())
 		{
-			// The single most confusing thing about pooling: your cards go nowhere while anyone in
-			// the party is undecided, because a party message cannot skip one person.
+			// Nothing of theirs and nothing of yours moves until at least one person is synced.
 			String who = String.join(", ", status.sharingBlockedBy);
-			JLabel blocked = new JLabel("<html>Your cards are not shared yet &mdash; waiting on "
-				+ who + "</html>");
+			JLabel blocked = new JLabel("<html>Not sharing yet &mdash; sync " + who
+				+ " to pool cards</html>");
 			blocked.setFont(FontManager.getRunescapeSmallFont());
 			blocked.setForeground(GOLD);
-			blocked.setToolTipText("Party messages reach everyone, so nothing is sent until every "
-				+ "member here is synced or declined.");
+			blocked.setToolTipText("Your collection is only sent to people you have synced with. "
+				+ "Sync someone here and it starts flowing both ways.");
 			blocked.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
 			blocked.setAlignmentX(Component.LEFT_ALIGNMENT);
 			list.add(blocked);
