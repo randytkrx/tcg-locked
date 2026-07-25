@@ -101,6 +101,8 @@ public class TcgLockedPlugin extends Plugin
 	// cards are offered to it. Each message carries the complete set and replaces the last.
 	private static final String BRONZEMAN_API_NAMESPACE = "bronzemantcg";
 	private static final String BRONZEMAN_SHARED_UNLOCKS = "shared-unlocks";
+	/** Its handshake: it asks, we answer with the complete current set. */
+	private static final String BRONZEMAN_QUERY = "query-shared-unlocks";
 	private static final String BRONZEMAN_SOURCE_KEY = "source";
 	private static final String BRONZEMAN_NAMES_KEY = "cardNames";
 	private static final String BRONZEMAN_SOURCE_NAME = "TCG Locked";
@@ -384,6 +386,18 @@ public class TcgLockedPlugin extends Plugin
 	@Subscribe
 	public void onPluginMessage(net.runelite.client.events.PluginMessage event)
 	{
+		if (BRONZEMAN_API_NAMESPACE.equals(event.getNamespace()))
+		{
+			if (BRONZEMAN_QUERY.equals(event.getName()))
+			{
+				// Bronzeman TCG asks after starting, switching profile, or having sharing turned
+				// back on — in each case it has forgotten what we sent, so answer with the current
+				// set even when it hasn't changed.
+				lastSharedWithBronzeman = null;
+				shareUnlocksWithBronzeman();
+			}
+			return;
+		}
 		if (!TCG_API_NAMESPACE.equals(event.getNamespace())
 			|| (!TCG_API_REPLY.equals(event.getName()) && !TCG_API_CHANGED.equals(event.getName())))
 		{
