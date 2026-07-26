@@ -28,7 +28,10 @@ rather than items, so those always work.
 
 Monsters can be locked as well. Until you own a monster's card you cannot attack,
 talk to or otherwise interact with it, though you can always examine it. Monsters
-with no card in the catalog are free.
+with no card in the catalog are free. Every NPC model and ground, inventory,
+bank, or equipment item is outlined green when its card is unlocked, red when
+its card exists but is locked, and purple when no card exists. These can be
+toggled with the NPC and item unlock highlight settings.
 
 Consumables are optional. When enabled you cannot eat or drink an item without its
 card. A one click difficulty picker sets all of this for you, or choose Custom to
@@ -65,6 +68,13 @@ Until OSRS TCG has answered, TCG Locked locks nothing at all and the panel says
 so. "No collection yet" means the challenge is not running, never that you own no
 cards, so a missing or outdated OSRS TCG plugin can't leave you unable to use your
 gear.
+
+## Free-to-play accounts
+
+The account content setting can follow the current world automatically, force F2P
+only, or use all content. In F2P mode, only cards that OSRS TCG identifies as
+free-to-play count toward personal or pooled unlocks. Members-only cards already
+in an older collection are ignored while the mode is active.
 
 ## Bugs and feature requests
 

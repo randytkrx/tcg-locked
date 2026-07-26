@@ -78,6 +78,19 @@ public interface TcgLockedConfig extends Config
 	String ADVANCED = "advanced";
 
 	@ConfigItem(
+		keyName = "contentMode",
+		name = "Account content",
+		description = "Auto uses F2P card unlocks on free worlds and all cards on members worlds. "
+			+ "Forced modes are available for restricted account profiles.",
+		section = LOCKING,
+		position = -1
+	)
+	default ContentMode contentMode()
+	{
+		return ContentMode.AUTO;
+	}
+
+	@ConfigItem(
 		keyName = "preset",
 		name = "Difficulty",
 		description = "A one click difficulty. Choose Custom to control each lock below yourself.",
@@ -222,8 +235,10 @@ public interface TcgLockedConfig extends Config
 
 	@ConfigItem(
 		keyName = "showLockIcons",
-		name = "Lock icons on items",
-		description = "Draw a padlock and dim items in the inventory, bank and equipment that you don't own a card for.",
+		name = "Item unlock highlights",
+		description = "Outline ground, inventory, bank and equipment items: green when unlocked, red when its "
+			+ "card exists but is locked, and purple when no card exists. Locked widget items are also dimmed "
+			+ "and padlocked.",
 		section = FEEDBACK,
 		position = 4
 	)
@@ -233,11 +248,24 @@ public interface TcgLockedConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "showNpcHighlights",
+		name = "NPC unlock highlights",
+		description = "Outline every NPC in the world: green when its TCG card is unlocked, red when its card "
+			+ "exists but is locked, and purple when no card exists.",
+		section = FEEDBACK,
+		position = 5
+	)
+	default boolean showNpcHighlights()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "showOverlay",
 		name = "Show violation overlay",
 		description = "Show an overlay listing locked items you currently have equipped.",
 		section = FEEDBACK,
-		position = 5
+		position = 6
 	)
 	default boolean showOverlay()
 	{
@@ -249,7 +277,7 @@ public interface TcgLockedConfig extends Config
 		name = "Warn in chat",
 		description = "Post a game message when a locked item ends up equipped.",
 		section = FEEDBACK,
-		position = 6
+		position = 7
 	)
 	default boolean warnInChat()
 	{
@@ -262,7 +290,7 @@ public interface TcgLockedConfig extends Config
 		description = "When in a RuneLite party, share your unlock progress and announce your unlocks, and show a "
 			+ "party progress list in the panel.",
 		section = FEEDBACK,
-		position = 7
+		position = 8
 	)
 	default boolean partyShare()
 	{

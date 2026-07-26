@@ -96,6 +96,7 @@ public class TcgLockedPlugin extends Plugin
 	private static final String TCG_API_REPLY = "owned-names";
 	private static final String TCG_API_CHANGED = "owned-names-changed";
 	private static final String TCG_API_NAMES_KEY = "ownedNames";
+	private static final String TCG_API_F2P_NAMES_KEY = "f2pEligibleNames";
 	/** Re-query cadence (game ticks) until OSRS TCG answers — covers it starting after us. */
 	private static final int API_QUERY_RETRY_TICKS = 100;
 	/**
@@ -148,6 +149,12 @@ public class TcgLockedPlugin extends Plugin
 
 	@Inject
 	private TcgLockedItemOverlay itemOverlay;
+
+	@Inject
+	private TcgLockedGroundItemOverlay groundItemOverlay;
+
+	@Inject
+	private TcgLockedNpcOverlay npcOverlay;
 
 	@Inject
 	private TcgLockedRevealOverlay revealOverlay;
@@ -209,6 +216,11 @@ public class TcgLockedPlugin extends Plugin
 
 	/** Normalized ("card key") forms of the owned names, so item variants unlock from a single base card. */
 	private volatile Set<String> ownedNormalized = Collections.emptySet();
+
+	/** F2P-eligible card names supplied by OSRS TCG alongside the owned-card snapshot. */
+	private volatile Set<String> f2pEligibleLower = Collections.emptySet();
+	private volatile Set<String> f2pEligibleNormalized = Collections.emptySet();
+	private volatile boolean f2pEligibilityKnown;
 
 	/** Normalized keys from the user's always-allow config list. */
 	private volatile Set<String> extraAllowNormalized = Collections.emptySet();
@@ -296,6 +308,8 @@ public class TcgLockedPlugin extends Plugin
 
 		overlayManager.add(overlay);
 		overlayManager.add(itemOverlay);
+		overlayManager.add(groundItemOverlay);
+		overlayManager.add(npcOverlay);
 		// overlayManager.add(revealOverlay); // disabled with the reveal, see showPendingUnlocks
 
 		rebuildExtraAllow();
@@ -381,6 +395,8 @@ public class TcgLockedPlugin extends Plugin
 
 		overlayManager.remove(overlay);
 		overlayManager.remove(itemOverlay);
+		overlayManager.remove(groundItemOverlay);
+		overlayManager.remove(npcOverlay);
 		overlayManager.remove(revealOverlay);
 		revealOverlay.clear();
 
@@ -388,6 +404,9 @@ public class TcgLockedPlugin extends Plugin
 		apiQueryTicks = -1;
 		ownedLower = Collections.emptySet();
 		ownedNormalized = Collections.emptySet();
+		f2pEligibleLower = Collections.emptySet();
+		f2pEligibleNormalized = Collections.emptySet();
+		f2pEligibilityKnown = false;
 		extraAllowNormalized = Collections.emptySet();
 		equippedViolationNames = Collections.emptyList();
 		lockedInBagNames = Collections.emptyList();
@@ -415,6 +434,7 @@ public class TcgLockedPlugin extends Plugin
 			// Re-ask on every login and world hop, and synchronously (EventBus.post replies inline
 			// when the TCG plugin is running) so the refresh below reads the real collection rather
 			// than a transiently unknown one. Also re-syncs after a push we missed while hopping.
+			baselineEstablished = false;
 			forceQueryTcgApi();
 			scheduleRefresh();
 		}
@@ -459,6 +479,10 @@ public class TcgLockedPlugin extends Plugin
 					withdrawFromApprovedMembers();
 				}
 				markSharedCatalogDirty();
+			}
+			if ("contentMode".equals(event.getKey()))
+			{
+				baselineEstablished = false;
 			}
 			rebuildExtraAllow();
 			lockbookDirty = true;
@@ -513,6 +537,13 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return;
 		}
+		Object f2pNames = data.get(TCG_API_F2P_NAMES_KEY);
+		if (f2pNames instanceof List)
+		{
+			f2pEligibleLower = F2pCardFilter.lowerNames((List<?>) f2pNames);
+			f2pEligibleNormalized = F2pCardFilter.normalizedNames((List<?>) f2pNames);
+			f2pEligibilityKnown = true;
+		}
 		boolean firstPayload = !collectionReader.hasCollection();
 		collectionReader.onApiOwnedNames((List<?>) names);
 		if (firstPayload && collectionReader.hasCollection())
@@ -529,6 +560,9 @@ public class TcgLockedPlugin extends Plugin
 		// re-baseline silently (the cross-profile delta is not "unlocks"), and re-query.
 		withdrawFromApprovedMembers();
 		collectionReader.invalidate();
+		f2pEligibleLower = Collections.emptySet();
+		f2pEligibleNormalized = Collections.emptySet();
+		f2pEligibilityKnown = false;
 		poolConsent.invalidate();
 		pooledKeys.clear();
 		offeredKeys.clear();
@@ -1050,7 +1084,8 @@ public class TcgLockedPlugin extends Plugin
 		// pass is treated as still-unknown and the next one baselines silently, which is the safe
 		// direction. (Set-then-flag could announce an entire collection as unlocks.)
 		final boolean collectionKnown = collectionReader.hasCollection();
-		Set<String> owned = collectionReader.readOwnedCardNamesLower();
+		Set<String> owned = F2pCardFilter.filter(
+			collectionReader.readOwnedCardNamesLower(), f2pEligibleLower, f2pFilteringActive());
 		Set<String> normalized = new HashSet<>();
 		for (String name : owned)
 		{
@@ -1227,7 +1262,13 @@ public class TcgLockedPlugin extends Plugin
 		{
 			if (keys != null)
 			{
-				pooledCardKeys.addAll(keys);
+				for (String key : keys)
+				{
+					if (isEligibleInCurrentMode(key))
+					{
+						pooledCardKeys.add(key);
+					}
+				}
 			}
 		}
 
@@ -1549,14 +1590,20 @@ public class TcgLockedPlugin extends Plugin
 			// Unknown item name: don't lock the player out of something we can't identify.
 			return TcgLockedStatus.UnlockSource.UNCARDED;
 		}
-		if (ownedLower.contains(name.toLowerCase(Locale.ROOT)))
-		{
-			return TcgLockedStatus.UnlockSource.OWNED;
-		}
 		String key = TcgItemNameNormalizer.normalize(name);
 		if (key.isEmpty())
 		{
 			return TcgLockedStatus.UnlockSource.UNCARDED;
+		}
+		if (!isEligibleInCurrentMode(key))
+		{
+			// Members-only cards do not participate in an F2P challenge, so their items are
+			// uncarded rather than permanently locked behind a roll that can never happen.
+			return TcgLockedStatus.UnlockSource.UNCARDED;
+		}
+		if (ownedLower.contains(name.toLowerCase(Locale.ROOT)))
+		{
+			return TcgLockedStatus.UnlockSource.OWNED;
 		}
 		if (ownedNormalized.contains(key))
 		{
@@ -1586,7 +1633,19 @@ public class TcgLockedPlugin extends Plugin
 	private int sharedCardCount(String partnerKey)
 	{
 		Set<String> keys = pooledKeys.get(partnerKey);
-		return keys == null ? 0 : keys.size();
+		if (keys == null)
+		{
+			return 0;
+		}
+		int count = 0;
+		for (String key : keys)
+		{
+			if (isEligibleInCurrentMode(key))
+			{
+				count++;
+			}
+		}
+		return count;
 	}
 
 	/** @return the synced partners whose cards unlock this item, for the panel's group view. */
@@ -1600,7 +1659,7 @@ public class TcgLockedPlugin extends Plugin
 		for (Map.Entry<String, Set<String>> entry : pooledKeys.entrySet())
 		{
 			Set<String> keys = entry.getValue();
-			if (keys != null && keys.contains(key))
+			if (keys != null && isEligibleInCurrentMode(key) && keys.contains(key))
 			{
 				names.add(entry.getKey());
 			}
@@ -1624,7 +1683,13 @@ public class TcgLockedPlugin extends Plugin
 			{
 				if (keys != null)
 				{
-					pooled.addAll(keys);
+					for (String key : keys)
+					{
+						if (isEligibleInCurrentMode(key))
+						{
+							pooled.add(key);
+						}
+					}
 				}
 			}
 		}
@@ -1655,7 +1720,7 @@ public class TcgLockedPlugin extends Plugin
 		}
 		for (Set<String> keys : pooledKeys.values())
 		{
-			if (keys != null && keys.contains(key))
+			if (keys != null && isEligibleInCurrentMode(key) && keys.contains(key))
 			{
 				return true;
 			}
@@ -1996,31 +2061,37 @@ public class TcgLockedPlugin extends Plugin
 	 */
 	private boolean isNpcUnlocked(String npcName)
 	{
-		if (!collectionReader.hasCollection())
-		{
-			return true;
-		}
-		String key = TcgItemNameNormalizer.normalize(npcName);
-		if (key.isEmpty())
-		{
-			return true;
-		}
-		Set<String> cards = cardCatalog.npcCards(key);
-		if (cards.isEmpty())
-		{
-			// No card exists for this NPC (or unparseable name): always free.
-			return true;
-		}
-		// Several cards can share one in-game name (an "Archer" is carded per location); any of them
-		// unlocks it, and the card's own name is what the collection is keyed by, not the NPC's.
-		for (String card : cards)
-		{
-			if (ownedNormalized.contains(card) || extraAllowNormalized.contains(card) || unlockedByParty(card))
-			{
-				return true;
-			}
-		}
-		return false;
+		return npcState(npcName) != TcgLockedNpcState.LOCKED;
+	}
+
+	/**
+	 * Resolves the visual and enforcement state for an NPC from the same collection, content-mode,
+	 * allow-list and party rules. Uncarded NPCs and cards outside the current content mode are
+	 * untracked, so the overlay leaves them unchanged.
+	 */
+	TcgLockedNpcState npcState(String npcName)
+	{
+		return TcgLockedNpcState.resolve(
+			collectionReader.hasCollection(),
+			npcName,
+			cardCatalog,
+			this::isEligibleInCurrentMode,
+			card -> ownedNormalized.contains(card)
+				|| extraAllowNormalized.contains(card)
+				|| unlockedByParty(card));
+	}
+
+	private boolean f2pFilteringActive()
+	{
+		ContentMode mode = config.contentMode() == null ? ContentMode.AUTO : config.contentMode();
+		// Older OSRS TCG versions do not publish eligibility metadata. Stay compatible by waiting
+		// for that catalog instead of treating every card as members-only.
+		return f2pEligibilityKnown && mode.isF2p(client.getWorldType());
+	}
+
+	private boolean isEligibleInCurrentMode(String normalizedKey)
+	{
+		return !f2pFilteringActive() || f2pEligibleNormalized.contains(normalizedKey);
 	}
 
 	/** Strips colour tags and a trailing "(level-N)" from an NPC menu target to recover the plain name. */
