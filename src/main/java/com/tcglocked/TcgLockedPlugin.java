@@ -165,6 +165,9 @@ public class TcgLockedPlugin extends Plugin
 	private TcgLockedPanel panel;
 
 	@Inject
+	private TcgSharedCatalogManager sharedCatalogManager;
+
+	@Inject
 	private net.runelite.client.eventbus.EventBus eventBus;
 
 	@Inject
@@ -259,6 +262,9 @@ public class TcgLockedPlugin extends Plugin
 	private int cachedLockbookUnlocked;
 	private int cachedLockbookPooled;
 	private Map<String, Integer> cachedContributions = Collections.emptyMap();
+	private boolean sharedCatalogDirty = true;
+	private TcgSharedCatalogSnapshot sharedCatalogSnapshot =
+		new TcgSharedCatalogSnapshot(Collections.emptyMap());
 
 	@Provides
 	TcgLockedConfig provideConfig(ConfigManager configManager)
@@ -271,8 +277,11 @@ public class TcgLockedPlugin extends Plugin
 	{
 		started = true;
 		lifecycleGeneration++;
+		sharedCatalogDirty = true;
 		panel.setRefreshAction(this::manualRefresh);
 		panel.setConsentAction(this::setPoolConsent);
+		panel.setSharedCatalogAction(this::openSharedCatalog);
+		sharedCatalogManager.start();
 		navButton = NavigationButton.builder()
 			.tooltip("TCG Locked")
 			.icon(TcgLockedPanel.crestIcon(24))
@@ -345,6 +354,8 @@ public class TcgLockedPlugin extends Plugin
 	{
 		started = false;
 		lifecycleGeneration++;
+		panel.setSharedCatalogAction(null);
+		sharedCatalogManager.dispose();
 		withdrawFromApprovedMembers();
 		if (navButton != null)
 		{
@@ -389,6 +400,8 @@ public class TcgLockedPlugin extends Plugin
 		cachedLockItems = Collections.emptyList();
 		cachedContributions = Collections.emptyMap();
 		lockbookDirty = true;
+		sharedCatalogDirty = true;
+		sharedCatalogSnapshot = new TcgSharedCatalogSnapshot(Collections.emptyMap());
 		seenProfileKey = null;
 		baselineEstablished = false;
 		sessionUnlocks = 0;
@@ -445,6 +458,7 @@ public class TcgLockedPlugin extends Plugin
 				{
 					withdrawFromApprovedMembers();
 				}
+				markSharedCatalogDirty();
 			}
 			rebuildExtraAllow();
 			lockbookDirty = true;
@@ -523,6 +537,9 @@ public class TcgLockedPlugin extends Plugin
 		saidNoCollection = false;
 		saidCollectionLoaded = false;
 		seenProfileKey = null;
+		seenItemIds.clear();
+		cachedLockItems = Collections.emptyList();
+		cachedContributions = Collections.emptyMap();
 		ownedLower = Collections.emptySet();
 		ownedNormalized = Collections.emptySet();
 		previousOwned.clear();
@@ -534,6 +551,7 @@ public class TcgLockedPlugin extends Plugin
 		partyProgress.clear();
 		lastBroadcast = null;
 		lockbookDirty = true;
+		markSharedCatalogDirty();
 		baselineEstablished = false;
 		queryTcgApi();
 		apiQueryTicks = collectionReader.hasCollection() ? -1 : 0;
@@ -573,7 +591,12 @@ public class TcgLockedPlugin extends Plugin
 		}
 		PartyMember from = partyService.getMemberById(message.getMemberId());
 		String partnerKey = from == null ? "" : rememberMemberKey(from);
-		if (sent != null && !partnerKey.isEmpty() && addressedToUs(message.getSharedWith()))
+		boolean addressed = addressedToUs(message.getSharedWith());
+		if (!partnerKey.isEmpty() && !addressed && message.getSharedWith() != null)
+		{
+			removePooledCollection(partnerKey);
+		}
+		else if (sent != null && !partnerKey.isEmpty() && addressed)
 		{
 			// Keys reach the whole party — there is no per-recipient send — so two things gate them:
 			// the sender addressing us, and our own consent. Both must agree, which is what keeps
@@ -581,10 +604,19 @@ public class TcgLockedPlugin extends Plugin
 			offeredKeys.put(partnerKey, sent);
 			if (poolConsent.isApproved(partnerKey))
 			{
-				pooledKeys.put(partnerKey, sent);
+				Set<String> previous = pooledKeys.put(partnerKey, sent);
 				savePooledPartner(partnerKey, sent);
 				lockbookDirty = true;
+				if (!sent.equals(previous))
+				{
+					markSharedCatalogDirty();
+				}
 			}
+		}
+		else if (packed != null && !partnerKey.isEmpty() && addressed)
+		{
+			// A malformed or differently-versioned bitmap must not leave an older collection active.
+			removePooledCollection(partnerKey);
 		}
 		if (firstContact)
 		{
@@ -720,6 +752,8 @@ public class TcgLockedPlugin extends Plugin
 		if (!audience.isEmpty() && (force || collectionChanged))
 		{
 			message.setPackedOwnedKeys(cardCatalog.packKeys(ownedNormalized));
+			// Keep interoperability with the currently released pre-bitmap client during rollout.
+			message.setOwnedKeys(ownedNormalized);
 			lastBroadcastOwned = Collections.unmodifiableSet(new HashSet<>(ownedNormalized));
 		}
 		partyService.send(message);
@@ -928,7 +962,7 @@ public class TcgLockedPlugin extends Plugin
 		for (Item item : inventory.getItems())
 		{
 			int id = item.getId();
-			if (id <= 0 || !isItemLockedByPreset(id))
+			if (id <= 0 || isUnlocked(id))
 			{
 				continue;
 			}
@@ -960,6 +994,41 @@ public class TcgLockedPlugin extends Plugin
 		// button recovers a stale collection instead of just repainting the same numbers.
 		forceQueryTcgApi();
 		scheduleRefresh();
+	}
+
+	private void openSharedCatalog()
+	{
+		invokeLaterIfStarted(() -> sharedCatalogManager.show(sharedCatalogSnapshot()));
+	}
+
+	private TcgSharedCatalogSnapshot sharedCatalogSnapshot()
+	{
+		if (!sharedCatalogDirty)
+		{
+			return sharedCatalogSnapshot;
+		}
+		Map<String, Set<String>> owners = new HashMap<>();
+		if (config.partyShare())
+		{
+			for (String approved : poolConsent.approvedKeys())
+			{
+				owners.put(approved, Collections.emptySet());
+			}
+			for (Map.Entry<String, Set<String>> entry : pooledKeys.entrySet())
+			{
+				owners.put(entry.getKey(), entry.getValue() == null
+					? Collections.emptySet() : new HashSet<>(entry.getValue()));
+			}
+		}
+		sharedCatalogSnapshot = new TcgSharedCatalogSnapshot(owners);
+		sharedCatalogDirty = false;
+		return sharedCatalogSnapshot;
+	}
+
+	private void markSharedCatalogDirty()
+	{
+		sharedCatalogDirty = true;
+		sharedCatalogManager.refreshIfVisible(sharedCatalogSnapshot());
 	}
 
 	/** Runs on the client thread (scheduled via {@link #scheduleRefresh()}), so unlock-diff state has no races. */
@@ -1186,7 +1255,6 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return;
 		}
-
 		List<TcgLockedStatus.LockItem> all = new ArrayList<>(seenItemIds.size());
 		int unlocked = 0;
 		int pooled = 0;
@@ -1397,27 +1465,6 @@ public class TcgLockedPlugin extends Plugin
 			return true;
 		}
 		return effGateConsumables() && CONSUME_VERBS.contains(verb);
-	}
-
-	boolean isItemLockedByPreset(int itemId)
-	{
-		if (isUnlocked(itemId))
-		{
-			return false;
-		}
-		String[] actions = itemManager.getItemComposition(itemManager.canonicalize(itemId)).getInventoryActions();
-		if (actions == null)
-		{
-			return false;
-		}
-		for (String action : actions)
-		{
-			if (action != null && isGatedVerb(action.toLowerCase(Locale.ROOT).trim()))
-			{
-				return true;
-			}
-		}
-		return false;
 	}
 
 	// The difficulty preset overrides the individual toggles unless it is Custom.
@@ -1723,6 +1770,7 @@ public class TcgLockedPlugin extends Plugin
 				sendWithdraw(key);
 			}
 			lockbookDirty = true;
+			markSharedCatalogDirty();
 			// Our own keys only go out once everyone present is approved, so a decision changes what
 			// we broadcast as well as what we apply.
 			broadcastProgress(true);
@@ -1837,8 +1885,21 @@ public class TcgLockedPlugin extends Plugin
 		if (had)
 		{
 			lockbookDirty = true;
+			markSharedCatalogDirty();
 			chat(from.getDisplayName().trim() + " stopped sharing their cards with you.");
 			refreshOwned();
+		}
+	}
+
+	private void removePooledCollection(String partnerKey)
+	{
+		boolean had = pooledKeys.remove(partnerKey) != null;
+		offeredKeys.remove(partnerKey);
+		forgetPooledPartner(partnerKey);
+		if (had)
+		{
+			lockbookDirty = true;
+			markSharedCatalogDirty();
 		}
 	}
 
@@ -1896,6 +1957,7 @@ public class TcgLockedPlugin extends Plugin
 				forgetPooledPartner(partnerKey);
 			}
 		}
+		markSharedCatalogDirty();
 	}
 
 	private List<String> readPooledPartnerNames()

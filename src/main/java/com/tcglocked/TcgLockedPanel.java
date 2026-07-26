@@ -26,6 +26,7 @@ import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.GridLayout;
 import java.awt.RenderingHints;
+import java.awt.Rectangle;
 import java.awt.geom.Ellipse2D;
 import java.awt.geom.GeneralPath;
 import java.awt.image.BufferedImage;
@@ -40,11 +41,13 @@ import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.JScrollBar;
 import javax.swing.JScrollPane;
 import javax.swing.SwingConstants;
 import javax.swing.border.CompoundBorder;
 import javax.swing.border.MatteBorder;
 import javax.swing.event.MouseInputAdapter;
+import javax.swing.plaf.basic.BasicScrollBarUI;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
@@ -89,6 +92,7 @@ class TcgLockedPanel extends PluginPanel
 	private final ItemManager itemManager;
 	private final JPanel body = new JPanel();
 	private Runnable refreshAction = TcgLockedPanel::noop;
+	private Runnable sharedCatalogAction = TcgLockedPanel::noop;
 	/** (player name, approved) — set by the plugin so the pooling controls can act. */
 	private BiConsumer<String, Boolean> consentAction = TcgLockedPanel::noConsent;
 	private LockFilter filter = LockFilter.ALL;
@@ -111,6 +115,7 @@ class TcgLockedPanel extends PluginPanel
 		getScrollPane().setBorder(null);
 		getScrollPane().setBackground(ColorScheme.DARK_GRAY_COLOR);
 		getScrollPane().getViewport().setBackground(ColorScheme.DARK_GRAY_COLOR);
+		styleScrollBar(getScrollPane().getVerticalScrollBar());
 
 		render(lastStatus);
 	}
@@ -118,6 +123,11 @@ class TcgLockedPanel extends PluginPanel
 	void setRefreshAction(Runnable action)
 	{
 		this.refreshAction = action == null ? TcgLockedPanel::noop : action;
+	}
+
+	void setSharedCatalogAction(Runnable action)
+	{
+		this.sharedCatalogAction = action == null ? TcgLockedPanel::noop : action;
 	}
 
 	void setConsentAction(BiConsumer<String, Boolean> action)
@@ -192,6 +202,13 @@ class TcgLockedPanel extends PluginPanel
 	private JPanel buildParty(TcgLockedStatus status)
 	{
 		JPanel list = vBox();
+		list.add(sharedCatalogButton());
+		list.add(vGap(7));
+
+		if (status.party.isEmpty())
+		{
+			list.add(emptyLine("No synced partners yet."));
+		}
 
 		if (!status.sharingBlockedBy.isEmpty())
 		{
@@ -246,6 +263,21 @@ class TcgLockedPanel extends PluginPanel
 			}
 		}
 		return list;
+	}
+
+	private JButton sharedCatalogButton()
+	{
+		JButton button = new JButton("Open shared catalog");
+		button.setFocusPainted(false);
+		button.setFont(FontManager.getRunescapeSmallFont());
+		button.setForeground(GROUP_BLUE);
+		button.setBackground(SURFACE_RAISED);
+		button.setBorder(new CompoundBorder(new MatteBorder(1, 1, 1, 1, GROUP_BLUE.darker()),
+			BorderFactory.createEmptyBorder(5, 8, 5, 8)));
+		button.setAlignmentX(Component.LEFT_ALIGNMENT);
+		button.setMaximumSize(new Dimension(Integer.MAX_VALUE, 29));
+		button.addActionListener(event -> sharedCatalogAction.run());
+		return button;
 	}
 
 	/** What one synced partner is contributing: cards lent, and how many of your items only they open. */
@@ -499,8 +531,7 @@ class TcgLockedPanel extends PluginPanel
 		scroll.setBackground(SURFACE);
 		scroll.getViewport().setBackground(SURFACE);
 		scroll.setBorder(null);
-		scroll.getVerticalScrollBar().setPreferredSize(new Dimension(8, 0));
-		scroll.getVerticalScrollBar().setUnitIncrement(16);
+		styleScrollBar(scroll.getVerticalScrollBar());
 		scroll.setAlignmentX(Component.LEFT_ALIGNMENT);
 
 		int rows = (shown + LOCKBOOK_COLS - 1) / LOCKBOOK_COLS;
@@ -802,6 +833,60 @@ class TcgLockedPanel extends PluginPanel
 		label.setBorder(BorderFactory.createEmptyBorder(0, 0, 3, 0));
 		label.setAlignmentX(Component.LEFT_ALIGNMENT);
 		return label;
+	}
+
+	private static void styleScrollBar(JScrollBar scrollBar)
+	{
+		scrollBar.setPreferredSize(new Dimension(6, 0));
+		scrollBar.setUnitIncrement(16);
+		scrollBar.setOpaque(false);
+		scrollBar.setUI(new SlimScrollBarUI());
+	}
+
+	private static class SlimScrollBarUI extends BasicScrollBarUI
+	{
+		private static JButton zeroButton()
+		{
+			JButton button = new JButton();
+			Dimension zero = new Dimension(0, 0);
+			button.setPreferredSize(zero);
+			button.setMinimumSize(zero);
+			button.setMaximumSize(zero);
+			return button;
+		}
+
+		@Override
+		protected JButton createDecreaseButton(int orientation)
+		{
+			return zeroButton();
+		}
+
+		@Override
+		protected JButton createIncreaseButton(int orientation)
+		{
+			return zeroButton();
+		}
+
+		@Override
+		protected void paintTrack(Graphics g, JComponent c, Rectangle bounds)
+		{
+		}
+
+		@Override
+		protected void paintThumb(Graphics g, JComponent c, Rectangle bounds)
+		{
+			if (bounds.width <= 0 || bounds.height <= 0)
+			{
+				return;
+			}
+
+			Graphics2D graphics = (Graphics2D) g.create();
+			graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+			graphics.setColor(isThumbRollover() ? FAINT : BORDER);
+			graphics.fillRoundRect(bounds.x + 1, bounds.y + 1, bounds.width - 2, bounds.height - 2,
+				bounds.width, bounds.width);
+			graphics.dispose();
+		}
 	}
 
 	private Component vGap(int h)

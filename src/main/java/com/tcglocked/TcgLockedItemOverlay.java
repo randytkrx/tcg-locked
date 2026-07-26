@@ -29,8 +29,8 @@ import net.runelite.api.widgets.WidgetItem;
 import net.runelite.client.ui.overlay.WidgetItemOverlay;
 
 /**
- * Dims and draws a small padlock on inventory / bank / equipment items the player does not own a card for, sharing
- * {@link TcgLockedPlugin#isUnlocked(int)} so the visual exactly matches what menu enforcement blocks.
+ * Dims and draws a small padlock on inventory / bank / equipment items the player does not own a card for.
+ * Padlocks show collection ownership even when the active preset has no menu action to block for that item.
  */
 class TcgLockedItemOverlay extends WidgetItemOverlay
 {
@@ -59,7 +59,7 @@ class TcgLockedItemOverlay extends WidgetItemOverlay
 			// Deferred: Bronzeman TCG draws its own lock icons — avoid double padlocks.
 			return;
 		}
-		if (!plugin.isItemLockedByPreset(itemId))
+		if (plugin.isUnlocked(itemId))
 		{
 			return;
 		}
