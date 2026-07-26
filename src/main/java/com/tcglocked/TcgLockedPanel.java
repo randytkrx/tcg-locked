@@ -49,6 +49,7 @@ import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
+import net.runelite.client.util.LinkBrowser;
 
 /**
  * A collector's-ledger style panel for TCG Locked: a lock-shield crest, two stat tiles, a "latest / recently unlocked"
@@ -67,6 +68,8 @@ class TcgLockedPanel extends PluginPanel
 	private static final Color LOCK_RED = new Color(0xD0, 0x5B, 0x5B);
 	/** Group blue: everything borrowed from a partner is this colour, never the gold of your own progress. */
 	private static final Color GROUP_BLUE = new Color(0x5B, 0x9B, 0xD5);
+	/** Where players are pointed for bugs and requests. */
+	private static final String DISCORD_URL = "https://discord.gg/tcglocked";
 	private static final int MAX_RECENT_ROWS = 8;
 	private static final int MAX_BAG_ROWS = 10;
 	private static final int LOCKBOOK_GRID_CAP = 150;
@@ -676,7 +679,25 @@ class TcgLockedPanel extends PluginPanel
 		footer.add(updated);
 		footer.add(vGap(6));
 		footer.add(refreshButton());
+		footer.add(vGap(6));
+		footer.add(discordLink());
 		return footer;
+	}
+
+	/** Where to report a bug or ask for something. Opens in the system browser. */
+	private JPanel discordLink()
+	{
+		JPanel row = row();
+		row.setBorder(BorderFactory.createEmptyBorder(0, 0, 2, 0));
+
+		JLabel label = new JLabel("Bugs and feature requests");
+		label.setFont(FontManager.getRunescapeSmallFont());
+		label.setForeground(FAINT);
+
+		row.add(label, BorderLayout.CENTER);
+		row.add(linkButton("Discord", GOLD, DISCORD_URL, () -> LinkBrowser.browse(DISCORD_URL)),
+			BorderLayout.EAST);
+		return row;
 	}
 
 	private JButton refreshButton()

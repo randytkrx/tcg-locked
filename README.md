@@ -63,6 +63,15 @@ so. "No collection yet" means the challenge is not running, never that you own n
 cards, so a missing or outdated OSRS TCG plugin can't leave you unable to use your
 gear.
 
+## Bugs and feature requests
+
+There is a Discord for the plugin at https://discord.gg/tcglocked, linked from the
+bottom of the side panel. Bug reports, feature requests and general questions are
+all welcome there.
+
+TCG Locked is an unofficial community plugin and is not affiliated with the OSRS
+TCG plugin or its developers.
+
 ## Building
 
 This is a standard RuneLite external plugin. Build it with Gradle:
