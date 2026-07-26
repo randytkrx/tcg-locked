@@ -31,6 +31,8 @@ public class TcgLockedPartyProgressMessage extends PartyMemberMessage
 	private int seen;
 	/** Normalized owned card keys, so party members can unlock items any member owns. */
 	private Set<String> ownedKeys;
+	/** Versioned compressed catalog bitmap used by current clients. */
+	private String packedOwnedKeys;
 	/**
 	 * RuneScape names this player is sharing with. A party message reaches everyone, so the payload
 	 * has to say who it is meant for — recipients not named here ignore the cards.

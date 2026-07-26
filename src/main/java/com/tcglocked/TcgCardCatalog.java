@@ -21,6 +21,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
@@ -63,10 +65,13 @@ class TcgCardCatalog
 	/** Leading tag on a packed collection: a raw bitmap, or one that was worth deflating. */
 	private static final char PACKED_RAW = 'b';
 	private static final char PACKED_DEFLATED = 'z';
+	private static final String PACKED_VERSION = "2";
+	private static final int MAX_PACKED_LENGTH = 16_384;
 
 	/** Every card key in a stable order, so a packed bitmap means the same thing on both sides. */
 	private List<String> indexedKeys = Collections.emptyList();
 	private Map<String, Integer> keyIndex = Collections.emptyMap();
+	private String catalogHash = "";
 
 	/** Normalized names of every item that has a card. */
 	private Set<String> itemCardKeys = Collections.emptySet();
@@ -128,9 +133,10 @@ class TcgCardCatalog
 		// Deflate only pays off for sparse collections; a nearly-full one is high entropy and comes
 		// back bigger. Keep whichever is smaller and tag it so unpacking knows which it was given.
 		byte[] deflated = deflate(bits);
-		return deflated != null && deflated.length < bits.length
+		String payload = deflated != null && deflated.length < bits.length
 			? PACKED_DEFLATED + Base64.getEncoder().encodeToString(deflated)
 			: PACKED_RAW + Base64.getEncoder().encodeToString(bits);
+		return PACKED_VERSION + ':' + catalogHash + ':' + payload;
 	}
 
 	private static byte[] deflate(byte[] raw)
@@ -158,15 +164,15 @@ class TcgCardCatalog
 		}
 	}
 
-	private static byte[] inflate(byte[] compressed, int maxLength) throws DataFormatException
+	private static byte[] inflate(byte[] compressed, int expectedLength) throws DataFormatException
 	{
 		Inflater inflater = new Inflater();
 		try
 		{
 			inflater.setInput(compressed);
-			ByteArrayOutputStream out = new ByteArrayOutputStream(maxLength);
+			ByteArrayOutputStream out = new ByteArrayOutputStream(expectedLength);
 			byte[] chunk = new byte[1024];
-			while (!inflater.finished() && out.size() <= maxLength)
+			while (!inflater.finished() && out.size() <= expectedLength)
 			{
 				int read = inflater.inflate(chunk);
 				if (read == 0 && (inflater.needsInput() || inflater.needsDictionary()))
@@ -174,6 +180,10 @@ class TcgCardCatalog
 					break;
 				}
 				out.write(chunk, 0, read);
+			}
+			if (!inflater.finished() || out.size() != expectedLength)
+			{
+				throw new DataFormatException("Unexpected packed collection length");
 			}
 			return out.toByteArray();
 		}
@@ -186,16 +196,45 @@ class TcgCardCatalog
 	/** @return the keys packed by {@link #packKeys}, or an empty set if the blob is unusable. */
 	Set<String> unpackKeys(String packed)
 	{
-		if (packed == null || packed.isEmpty())
+		Set<String> keys = unpackKeysOrNull(packed);
+		return keys == null ? Collections.emptySet() : keys;
+	}
+
+	/** @return decoded keys, or null when the payload is malformed or from another catalog. */
+	Set<String> unpackKeysOrNull(String packed)
+	{
+		if (packed == null)
+		{
+			return null;
+		}
+		if (packed.isEmpty())
 		{
 			return Collections.emptySet();
 		}
+		if (packed.length() > MAX_PACKED_LENGTH)
+		{
+			return null;
+		}
 		try
 		{
-			char form = packed.charAt(0);
-			byte[] stored = Base64.getDecoder().decode(packed.substring(1));
+			String[] header = packed.split(":", 3);
+			if (header.length != 3 || !PACKED_VERSION.equals(header[0]) || !catalogHash.equals(header[1])
+				|| header[2].length() < 2)
+			{
+				throw new IllegalArgumentException("Unknown packed collection format");
+			}
+			char form = header[2].charAt(0);
+			if (form != PACKED_RAW && form != PACKED_DEFLATED)
+			{
+				throw new IllegalArgumentException("Unknown packed collection encoding");
+			}
+			byte[] stored = Base64.getDecoder().decode(header[2].substring(1));
 			int byteLength = (indexedKeys.size() + 7) / 8;
 			byte[] bits = form == PACKED_DEFLATED ? inflate(stored, byteLength) : stored;
+			if (bits.length != byteLength)
+			{
+				throw new IllegalArgumentException("Unexpected packed collection length");
+			}
 			Set<String> keys = new HashSet<>();
 			int limit = Math.min(indexedKeys.size(), bits.length * 8);
 			for (int i = 0; i < limit; i++)
@@ -212,8 +251,26 @@ class TcgCardCatalog
 			// Corrupt or from a catalog that has since changed shape: forget it rather than gate on
 			// keys that now mean something else.
 			log.debug("TCG Locked: could not unpack a stored partner collection", ex);
-			return Collections.emptySet();
+			return null;
 		}
+	}
+
+	Set<String> filterKnownKeys(Set<String> keys)
+	{
+		if (keys == null || keys.size() > indexedKeys.size())
+		{
+			return null;
+		}
+		Set<String> filtered = new HashSet<>(keys.size());
+		for (String key : keys)
+		{
+			if (key == null || key.length() > 128 || !keyIndex.containsKey(key))
+			{
+				return null;
+			}
+			filtered.add(key);
+		}
+		return Collections.unmodifiableSet(filtered);
 	}
 
 	/** @return every card key the catalog knows, in index order. */
@@ -283,6 +340,7 @@ class TcgCardCatalog
 		TreeSet<String> all = new TreeSet<>(items);
 		npcs.values().forEach(all::addAll);
 		indexedKeys = Collections.unmodifiableList(new ArrayList<>(all));
+		catalogHash = hashCatalog(indexedKeys);
 		Map<String, Integer> index = new HashMap<>(indexedKeys.size() * 2);
 		for (int i = 0; i < indexedKeys.size(); i++)
 		{
@@ -290,6 +348,30 @@ class TcgCardCatalog
 		}
 		keyIndex = Collections.unmodifiableMap(index);
 		log.debug("TCG Locked: card catalog loaded ({} item cards, {} monsters).", items.size(), npcs.size());
+	}
+
+	private static String hashCatalog(List<String> keys)
+	{
+		try
+		{
+			MessageDigest digest = MessageDigest.getInstance("SHA-256");
+			for (String key : keys)
+			{
+				digest.update(key.getBytes(StandardCharsets.UTF_8));
+				digest.update((byte) 0);
+			}
+			byte[] hash = digest.digest();
+			StringBuilder out = new StringBuilder(16);
+			for (int i = 0; i < 8; i++)
+			{
+				out.append(String.format("%02x", hash[i]));
+			}
+			return out.toString();
+		}
+		catch (NoSuchAlgorithmException ex)
+		{
+			throw new IllegalStateException(ex);
+		}
 	}
 
 	/** Reads a bundled catalog, skipping blank lines and {@code #} comments. */

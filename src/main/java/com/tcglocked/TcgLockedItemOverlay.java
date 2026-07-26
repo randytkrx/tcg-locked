@@ -59,7 +59,7 @@ class TcgLockedItemOverlay extends WidgetItemOverlay
 			// Deferred: Bronzeman TCG draws its own lock icons — avoid double padlocks.
 			return;
 		}
-		if (plugin.isUnlocked(itemId))
+		if (!plugin.isItemLockedByPreset(itemId))
 		{
 			return;
 		}

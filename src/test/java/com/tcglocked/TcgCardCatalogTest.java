@@ -23,6 +23,7 @@ import java.util.Set;
 import org.junit.Test;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 public class TcgCardCatalogTest
@@ -124,6 +125,39 @@ public class TcgCardCatalogTest
 	}
 
 	@Test
+	public void packedCollectionCarriesCatalogVersion()
+	{
+		String packed = catalog.packKeys(Collections.singleton("abyssal whip"));
+		assertTrue(packed.startsWith("2:"));
+		assertNull(catalog.unpackKeysOrNull("2:wrongcatalog:" + packed.substring(packed.lastIndexOf(':') + 1)));
+	}
+
+	@Test
+	public void malformedFormatsAreRejected()
+	{
+		assertNull(catalog.unpackKeysOrNull("xAA=="));
+		assertNull(catalog.unpackKeysOrNull("2:wrong:bAA=="));
+		assertNull(catalog.unpackKeysOrNull("2:wrong:zAA=="));
+		assertTrue(catalog.unpackKeys("not a format").isEmpty());
+	}
+
+	@Test
+	public void packedDataMustHaveTheExactBitmapLength()
+	{
+		String packed = catalog.packKeys(Collections.singleton("abyssal whip"));
+		String header = packed.substring(0, packed.lastIndexOf(':') + 1);
+		assertNull(catalog.unpackKeysOrNull(header + "bAA=="));
+	}
+
+	@Test
+	public void incomingLegacyKeysAreBoundedToTheCatalog()
+	{
+		assertEquals(Collections.singleton("abyssal whip"),
+			catalog.filterKnownKeys(Collections.singleton("abyssal whip")));
+		assertNull(catalog.filterKnownKeys(Collections.singleton("not a card")));
+	}
+
+	@Test
 	public void packingDropsCardsOutsideTheCatalog()
 	{
 		// Lossless for gating: a key with no item or monster behind it can never unlock anything, so
@@ -138,7 +172,7 @@ public class TcgCardCatalogTest
 		// A handful of cards out of thousands is nearly all zero bits, so this is where compressing
 		// earns its keep.
 		String sparse = catalog.packKeys(Collections.singleton("abyssal whip"));
-		assertEquals('z', sparse.charAt(0));
+		assertEquals('z', sparse.charAt(sparse.lastIndexOf(':') + 1));
 		assertEquals(Collections.singleton("abyssal whip"), catalog.unpackKeys(sparse));
 	}
 

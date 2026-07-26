@@ -68,12 +68,16 @@ class TcgLockedPanel extends PluginPanel
 	private static final Color LOCK_RED = new Color(0xD0, 0x5B, 0x5B);
 	/** Group blue: everything borrowed from a partner is this colour, never the gold of your own progress. */
 	private static final Color GROUP_BLUE = new Color(0x5B, 0x9B, 0xD5);
+	private static final Color SURFACE = new Color(0x25, 0x25, 0x25);
+	private static final Color SURFACE_RAISED = new Color(0x30, 0x30, 0x30);
+	private static final Color BORDER = new Color(0x3B, 0x3B, 0x3B);
+	private static final Color SUCCESS = new Color(0x62, 0xB5, 0x72);
 	/** Where players are pointed for bugs and requests. */
 	private static final String DISCORD_URL = "https://discord.gg/tcglocked";
 	private static final int MAX_RECENT_ROWS = 8;
 	private static final int MAX_BAG_ROWS = 10;
 	private static final int LOCKBOOK_GRID_CAP = 150;
-	private static final int LOCKBOOK_COLS = 5;
+	private static final int LOCKBOOK_COLS = 4;
 	private static final int LOCKBOOK_ROW_HEIGHT = 34;
 	private static final int LOCKBOOK_MAX_HEIGHT = 170;
 
@@ -99,6 +103,7 @@ class TcgLockedPanel extends PluginPanel
 
 		body.setBackground(ColorScheme.DARK_GRAY_COLOR);
 		body.setLayout(new BoxLayout(body, BoxLayout.Y_AXIS));
+		body.setBorder(BorderFactory.createEmptyBorder(8, 8, 10, 8));
 		add(body, BorderLayout.NORTH);
 
 		// PluginPanel wraps us in a JScrollPane and never clears its default border, which draws a
@@ -141,26 +146,47 @@ class TcgLockedPanel extends PluginPanel
 	{
 		body.removeAll();
 		body.add(buildHeader(status));
-		body.add(vGap(10));
+		body.add(vGap(8));
 		body.add(buildStatTiles(status));
-		body.add(vGap(12));
-		body.add(section("Collection", buildCollection(status)));
-		body.add(vGap(12));
-		body.add(section("Recently unlocked", buildRecent(status)));
-		body.add(vGap(12));
-		body.add(section("Carrying but locked", buildLockedBag(status)));
-		if (!status.equippedViolations.isEmpty())
+		body.add(vGap(8));
+		body.add(section("Lockbook", buildCollection(status)));
+		if (!status.recentUnlocks.isEmpty())
 		{
-			body.add(vGap(12));
-			body.add(section("Equipped without a card", buildViolations(status), LOCK_RED));
+			body.add(vGap(8));
+			body.add(section("Latest pulls", buildRecent(status)));
+		}
+		if (!status.lockedInBag.isEmpty() || !status.equippedViolations.isEmpty())
+		{
+			body.add(vGap(8));
+			body.add(section("Needs attention", buildAttention(status), LOCK_RED));
 		}
 		if (!status.party.isEmpty())
 		{
-			body.add(vGap(12));
+			body.add(vGap(8));
 			body.add(section("Group", buildParty(status), GROUP_BLUE));
 		}
-		body.add(vGap(12));
+		body.add(vGap(8));
 		body.add(buildFooter(status));
+	}
+
+	private JPanel buildAttention(TcgLockedStatus status)
+	{
+		JPanel content = vBox();
+		if (!status.equippedViolations.isEmpty())
+		{
+			content.add(subheading("EQUIPPED", LOCK_RED));
+			content.add(buildViolations(status));
+		}
+		if (!status.lockedInBag.isEmpty())
+		{
+			if (!status.equippedViolations.isEmpty())
+			{
+				content.add(vGap(6));
+			}
+			content.add(subheading("IN YOUR BAG", MUTED));
+			content.add(buildLockedBag(status));
+		}
+		return content;
 	}
 
 	private JPanel buildParty(TcgLockedStatus status)
@@ -197,8 +223,8 @@ class TcgLockedPanel extends PluginPanel
 		for (TcgLockedStatus.PartyEntry e : status.party)
 		{
 			JPanel r = new JPanel(new BorderLayout(6, 0));
-			r.setBackground(ColorScheme.DARK_GRAY_COLOR);
-			r.setBorder(BorderFactory.createEmptyBorder(2, 0, 2, 0));
+			r.setBackground(SURFACE_RAISED);
+			r.setBorder(BorderFactory.createEmptyBorder(5, 7, 5, 7));
 
 			String suffix = e.local ? " (you)" : e.present ? "" : " (away)";
 			JLabel name = new JLabel(e.name + suffix);
@@ -226,8 +252,8 @@ class TcgLockedPanel extends PluginPanel
 	private JPanel sharingLine(TcgLockedStatus.PartyEntry e)
 	{
 		JPanel row = new JPanel(new BorderLayout(6, 0));
-		row.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		row.setBorder(BorderFactory.createEmptyBorder(0, 8, 3, 0));
+		row.setBackground(SURFACE);
+		row.setBorder(BorderFactory.createEmptyBorder(3, 7, 6, 7));
 
 		// A partner you approved but have never received cards from is still a group member; saying
 		// "no cards yet" is the truth, where showing nothing at all looks like they were forgotten.
@@ -263,7 +289,7 @@ class TcgLockedPanel extends PluginPanel
 		}
 
 		JPanel east = new JPanel(new BorderLayout(4, 0));
-		east.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		east.setBackground(SURFACE_RAISED);
 		JLabel prog = new JLabel(e.unlocked < 0 ? "…" : e.unlocked + " / " + e.seen);
 		prog.setFont(FontManager.getRunescapeSmallFont());
 		prog.setForeground(FAINT);
@@ -281,15 +307,15 @@ class TcgLockedPanel extends PluginPanel
 	private JPanel poolPrompt(String playerName)
 	{
 		JPanel row = new JPanel(new BorderLayout(6, 0));
-		row.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		row.setBorder(BorderFactory.createEmptyBorder(0, 8, 4, 0));
+		row.setBackground(SURFACE_RAISED);
+		row.setBorder(BorderFactory.createEmptyBorder(0, 7, 6, 7));
 
 		JLabel ask = new JLabel("Pool unlocks?");
 		ask.setFont(FontManager.getRunescapeSmallFont());
 		ask.setForeground(GOLD);
 
 		JPanel actions = new JPanel(new BorderLayout(6, 0));
-		actions.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		actions.setBackground(SURFACE_RAISED);
 		actions.add(linkButton("yes", ColorScheme.PROGRESS_COMPLETE_COLOR,
 			"Share cards with " + playerName + " and use theirs",
 			() -> consentAction.accept(playerName, true)), BorderLayout.CENTER);
@@ -337,22 +363,26 @@ class TcgLockedPanel extends PluginPanel
 	private JPanel buildHeader(TcgLockedStatus status)
 	{
 		JPanel header = row();
-		JLabel crest = new JLabel(new ImageIcon(crestIcon(26)));
-		crest.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 8));
+		header.setBackground(SURFACE);
+		header.setBorder(new CompoundBorder(new MatteBorder(1, 1, 1, 1, BORDER),
+			BorderFactory.createEmptyBorder(9, 10, 9, 10)));
+		JLabel crest = new JLabel(new ImageIcon(crestIcon(30)));
+		crest.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 10));
 		header.add(crest, BorderLayout.WEST);
 
 		JPanel titles = new JPanel();
-		titles.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		titles.setBackground(SURFACE);
 		titles.setLayout(new BoxLayout(titles, BoxLayout.Y_AXIS));
 
 		JLabel title = new JLabel("TCG Locked");
 		title.setFont(FontManager.getRunescapeBoldFont().deriveFont(15f));
-		title.setForeground(GOLD);
+		title.setForeground(INK);
 		title.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-		JLabel sub = new JLabel(status.enforcementLabel.isEmpty() ? "Card locked" : status.enforcementLabel);
+		JLabel sub = new JLabel((status.collectionLoaded ? "●  " : "○  ")
+			+ (status.enforcementLabel.isEmpty() ? "Waiting for collection" : status.enforcementLabel));
 		sub.setFont(FontManager.getRunescapeSmallFont());
-		sub.setForeground(MUTED);
+		sub.setForeground(status.collectionLoaded ? SUCCESS : GOLD);
 		sub.setAlignmentX(Component.LEFT_ALIGNMENT);
 
 		titles.add(title);
@@ -365,11 +395,14 @@ class TcgLockedPanel extends PluginPanel
 
 	private JPanel buildStatTiles(TcgLockedStatus status)
 	{
-		JPanel tiles = new JPanel(new GridLayout(1, 2, 6, 0));
+		JPanel tiles = new JPanel(new GridLayout(1, 3, 5, 0));
 		tiles.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		tiles.add(statTile(Integer.toString(status.cardsOwned), "cards owned", GOLD));
+		tiles.add(statTile(Integer.toString(status.cardsOwned), "CARDS", GOLD));
+		int pct = status.lockbookSeen == 0 ? 0
+			: (int) Math.round(100.0 * status.lockbookUnlocked / status.lockbookSeen);
+		tiles.add(statTile(pct + "%", "OPEN", status.lockbookSeen == 0 ? FAINT : SUCCESS));
 		String sessionText = status.sessionUnlocks > 0 ? "+" + status.sessionUnlocks : "0";
-		tiles.add(statTile(sessionText, "this session",
+		tiles.add(statTile(sessionText, "SESSION",
 			status.sessionUnlocks > 0 ? ColorScheme.PROGRESS_COMPLETE_COLOR : INK));
 		return tiles;
 	}
@@ -377,14 +410,15 @@ class TcgLockedPanel extends PluginPanel
 	private JPanel statTile(String value, String label, Color valueColor)
 	{
 		JPanel tile = new JPanel(new BorderLayout());
-		tile.setBackground(ColorScheme.DARKER_GRAY_COLOR);
-		tile.setBorder(BorderFactory.createEmptyBorder(7, 9, 6, 9));
+		tile.setBackground(SURFACE_RAISED);
+		tile.setBorder(new CompoundBorder(new MatteBorder(1, 1, 1, 1, BORDER),
+			BorderFactory.createEmptyBorder(7, 7, 6, 7)));
 
 		JLabel v = new JLabel(value);
-		v.setFont(FontManager.getRunescapeBoldFont().deriveFont(18f));
+		v.setFont(FontManager.getRunescapeBoldFont().deriveFont(16f));
 		v.setForeground(valueColor);
 
-		JLabel l = new JLabel(label.toUpperCase());
+		JLabel l = new JLabel(label);
 		l.setFont(FontManager.getRunescapeSmallFont());
 		l.setForeground(FAINT);
 
@@ -408,7 +442,7 @@ class TcgLockedPanel extends PluginPanel
 		int unlocked = status.lockbookUnlocked;
 		int pct = seen == 0 ? 0 : (int) Math.round(100.0 * unlocked / seen);
 
-		JLabel progress = new JLabel("Unlocked " + unlocked + " / " + seen + "  (" + pct + "%)");
+		JLabel progress = new JLabel("<html><b>" + unlocked + "</b> of " + seen + " items available <font color='#8a8a8a'>· " + pct + "%</font></html>");
 		progress.setFont(FontManager.getRunescapeSmallFont());
 		progress.setForeground(INK);
 		progress.setBorder(BorderFactory.createEmptyBorder(0, 0, 3, 0));
@@ -433,8 +467,8 @@ class TcgLockedPanel extends PluginPanel
 		box.add(buildFilterRow());
 		box.add(vGap(6));
 
-		JPanel grid = new JPanel(new GridLayout(0, LOCKBOOK_COLS, 2, 2));
-		grid.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		JPanel grid = new JPanel(new GridLayout(0, LOCKBOOK_COLS, 3, 3));
+		grid.setBackground(SURFACE);
 		int shown = 0;
 		for (TcgLockedStatus.LockItem li : status.lockItems)
 		{
@@ -462,8 +496,8 @@ class TcgLockedPanel extends PluginPanel
 		// Contain the grid in a fixed-height dark scroll box so a full bank doesn't balloon the whole panel.
 		JScrollPane scroll = new JScrollPane(grid,
 			JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
-		scroll.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		scroll.getViewport().setBackground(ColorScheme.DARK_GRAY_COLOR);
+		scroll.setBackground(SURFACE);
+		scroll.getViewport().setBackground(SURFACE);
 		scroll.setBorder(null);
 		scroll.getVerticalScrollBar().setPreferredSize(new Dimension(8, 0));
 		scroll.getVerticalScrollBar().setUnitIncrement(16);
@@ -480,7 +514,7 @@ class TcgLockedPanel extends PluginPanel
 	private JPanel buildFilterRow()
 	{
 		JPanel row = new JPanel(new GridLayout(1, 4, 4, 0));
-		row.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		row.setBackground(SURFACE);
 		row.setAlignmentX(Component.LEFT_ALIGNMENT);
 		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 22));
 		row.add(filterButton("All", LockFilter.ALL));
@@ -496,9 +530,9 @@ class TcgLockedPanel extends PluginPanel
 		JButton button = new JButton(label);
 		button.setFocusPainted(false);
 		button.setFont(FontManager.getRunescapeSmallFont());
-		button.setForeground(active ? GOLD : INK);
-		button.setBackground(active ? ColorScheme.DARKER_GRAY_HOVER_COLOR : ColorScheme.DARKER_GRAY_COLOR);
-		button.setBorder(new MatteBorder(1, 1, 1, 1, ColorScheme.BORDER_COLOR));
+		button.setForeground(active ? GOLD : MUTED);
+		button.setBackground(active ? SURFACE_RAISED : SURFACE);
+		button.setBorder(new MatteBorder(0, 0, active ? 2 : 1, 0, active ? GOLD_DIM : BORDER));
 		button.addActionListener(e ->
 		{
 			filter = value;
@@ -594,7 +628,7 @@ class TcgLockedPanel extends PluginPanel
 	private JPanel unlockRow(String name, String when, boolean latest)
 	{
 		JPanel r = new JPanel(new BorderLayout(6, 0));
-		r.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		r.setBackground(SURFACE);
 		r.setBorder(BorderFactory.createEmptyBorder(2, 0, 2, 0));
 
 		JLabel n = new JLabel(name);
@@ -647,7 +681,7 @@ class TcgLockedPanel extends PluginPanel
 	private JPanel lockLine(String name, Color color)
 	{
 		JPanel r = new JPanel(new BorderLayout(6, 0));
-		r.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		r.setBackground(SURFACE);
 		r.setBorder(BorderFactory.createEmptyBorder(2, 0, 2, 0));
 		JLabel n = new JLabel(name);
 		n.setFont(FontManager.getRunescapeSmallFont());
@@ -660,44 +694,22 @@ class TcgLockedPanel extends PluginPanel
 
 	private JPanel buildFooter(TcgLockedStatus status)
 	{
-		JPanel footer = new JPanel();
-		footer.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		footer.setLayout(new BoxLayout(footer, BoxLayout.Y_AXIS));
-		footer.setBorder(new MatteBorder(1, 0, 0, 0, ColorScheme.BORDER_COLOR));
-
-		JPanel spacer = new JPanel();
-		spacer.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		spacer.setBorder(BorderFactory.createEmptyBorder(3, 0, 0, 0));
-		footer.add(spacer);
-
+		JPanel footer = row();
+		footer.setBorder(BorderFactory.createEmptyBorder(2, 2, 0, 2));
 		JLabel updated = new JLabel(status.collectionLoaded
-			? "Updated " + relativeTime(status.updatedAtMs, status.updatedAtMs)
-			: "No collection yet — nothing is locked");
+			? "Updated " + relativeTime(status.updatedAtMs, System.currentTimeMillis())
+			: "Waiting for OSRS TCG");
 		updated.setFont(FontManager.getRunescapeSmallFont());
 		updated.setForeground(FAINT);
-		updated.setAlignmentX(Component.LEFT_ALIGNMENT);
-		footer.add(updated);
-		footer.add(vGap(6));
-		footer.add(refreshButton());
-		footer.add(vGap(6));
-		footer.add(discordLink());
+
+		JPanel actions = new JPanel(new BorderLayout(8, 0));
+		actions.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		actions.add(linkButton("Discord", MUTED, DISCORD_URL, () -> LinkBrowser.browse(DISCORD_URL)),
+			BorderLayout.CENTER);
+		actions.add(refreshButton(), BorderLayout.EAST);
+		footer.add(updated, BorderLayout.CENTER);
+		footer.add(actions, BorderLayout.EAST);
 		return footer;
-	}
-
-	/** Where to report a bug or ask for something. Opens in the system browser. */
-	private JPanel discordLink()
-	{
-		JPanel row = row();
-		row.setBorder(BorderFactory.createEmptyBorder(0, 0, 2, 0));
-
-		JLabel label = new JLabel("Bugs and feature requests");
-		label.setFont(FontManager.getRunescapeSmallFont());
-		label.setForeground(FAINT);
-
-		row.add(label, BorderLayout.CENTER);
-		row.add(linkButton("Discord", GOLD, DISCORD_URL, () -> LinkBrowser.browse(DISCORD_URL)),
-			BorderLayout.EAST);
-		return row;
 	}
 
 	private JButton refreshButton()
@@ -705,12 +717,12 @@ class TcgLockedPanel extends PluginPanel
 		JButton button = new JButton("Refresh");
 		button.setFocusPainted(false);
 		button.setFont(FontManager.getRunescapeSmallFont());
-		button.setForeground(INK);
-		button.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		button.setForeground(MUTED);
+		button.setBackground(SURFACE_RAISED);
+		button.setToolTipText("Refresh collection");
 		button.setBorder(new CompoundBorder(
-			new MatteBorder(1, 1, 1, 1, ColorScheme.BORDER_COLOR),
-			BorderFactory.createEmptyBorder(4, 0, 4, 0)));
-		button.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+			new MatteBorder(1, 1, 1, 1, BORDER),
+			BorderFactory.createEmptyBorder(2, 5, 2, 5)));
 		button.addMouseListener(new MouseInputAdapter()
 		{
 			@Override
@@ -723,8 +735,8 @@ class TcgLockedPanel extends PluginPanel
 			@Override
 			public void mouseExited(java.awt.event.MouseEvent e)
 			{
-				button.setBackground(ColorScheme.DARKER_GRAY_COLOR);
-				button.setForeground(INK);
+				button.setBackground(SURFACE_RAISED);
+				button.setForeground(MUTED);
 			}
 		});
 		button.addActionListener(e -> refreshAction.run());
@@ -741,17 +753,16 @@ class TcgLockedPanel extends PluginPanel
 	private JPanel section(String heading, JPanel content, Color accent)
 	{
 		JPanel outer = new JPanel(new BorderLayout());
-		outer.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		// Gold left margin -> the "ledger rule".
+		outer.setBackground(SURFACE);
 		outer.setBorder(new CompoundBorder(
-			new MatteBorder(0, 2, 0, 0, accent.darker()),
-			BorderFactory.createEmptyBorder(0, 8, 0, 0)));
+			new MatteBorder(1, 1, 1, 1, BORDER),
+			BorderFactory.createEmptyBorder(9, 9, 9, 9)));
 
 		JPanel inner = vBox();
-		JLabel h = new JLabel(heading.toUpperCase());
-		h.setFont(FontManager.getRunescapeSmallFont());
+		JLabel h = new JLabel(heading);
+		h.setFont(FontManager.getRunescapeBoldFont());
 		h.setForeground(accent.equals(GOLD) ? GOLD : accent);
-		h.setBorder(BorderFactory.createEmptyBorder(0, 0, 3, 0));
+		h.setBorder(BorderFactory.createEmptyBorder(0, 0, 7, 0));
 		inner.add(h);
 		inner.add(content);
 
@@ -762,7 +773,7 @@ class TcgLockedPanel extends PluginPanel
 	private JPanel vBox()
 	{
 		JPanel p = new JPanel();
-		p.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		p.setBackground(SURFACE);
 		p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
 		return p;
 	}
@@ -781,6 +792,16 @@ class TcgLockedPanel extends PluginPanel
 		l.setForeground(FAINT);
 		l.setBorder(BorderFactory.createEmptyBorder(1, 0, 1, 0));
 		return l;
+	}
+
+	private JLabel subheading(String text, Color color)
+	{
+		JLabel label = new JLabel(text);
+		label.setFont(FontManager.getRunescapeSmallFont());
+		label.setForeground(color);
+		label.setBorder(BorderFactory.createEmptyBorder(0, 0, 3, 0));
+		label.setAlignmentX(Component.LEFT_ALIGNMENT);
+		return label;
 	}
 
 	private Component vGap(int h)

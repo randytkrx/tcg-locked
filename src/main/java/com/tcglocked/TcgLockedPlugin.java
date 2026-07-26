@@ -19,7 +19,6 @@ package com.tcglocked;
 import com.google.inject.Provides;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Deque;
@@ -79,6 +78,7 @@ public class TcgLockedPlugin extends Plugin
 		Set.of("rub", "teleport", "break", "commune", "invoke", "operate", "activate");
 	/** Menu actions that count as interacting with an NPC (not Examine). */
 	private static final Set<MenuAction> NPC_ACTIONS = Set.of(
+		MenuAction.ITEM_USE_ON_NPC, MenuAction.WIDGET_TARGET_ON_NPC,
 		MenuAction.NPC_FIRST_OPTION, MenuAction.NPC_SECOND_OPTION, MenuAction.NPC_THIRD_OPTION,
 		MenuAction.NPC_FOURTH_OPTION, MenuAction.NPC_FIFTH_OPTION);
 	private static final String SEEN_ITEMS_KEY = "seenItems";
@@ -86,7 +86,7 @@ public class TcgLockedPlugin extends Plugin
 	private static final String POOLED_PARTNERS_KEY = "pooledPartners";
 	private static final String POOLED_PREFIX = "pooled_";
 	private static final int RECENT_UNLOCK_CAP = 30;
-	private static final int LOCKBOOK_CAP = 400;
+	private static final int MAX_PARTY_PACKED_LENGTH = 16_384;
 
 	// OSRS TCG's PluginMessage API (its OwnedCardNamesApiService). We post a query; it replies
 	// with "owned-names" and pushes "owned-names-changed" after every collection change. String
@@ -171,6 +171,8 @@ public class TcgLockedPlugin extends Plugin
 	private net.runelite.client.plugins.PluginManager pluginManager;
 
 	private NavigationButton navButton;
+	private boolean started;
+	private int lifecycleGeneration;
 
 	/** Bronzeman TCG's PluginDescriptor name — detected so our enforcement can defer to its engine. */
 	private static final String BRONZEMAN_PLUGIN_NAME = "Bronzeman TCG";
@@ -228,6 +230,7 @@ public class TcgLockedPlugin extends Plugin
 	private final Map<String, Set<String>> offeredKeys = new HashMap<>();
 	/** Last progress values we broadcast, to avoid spamming the party with unchanged updates. */
 	private int[] lastBroadcast;
+	private Set<String> lastBroadcastOwned = Collections.emptySet();
 
 	/** Pooled cards last offered to Bronzeman TCG; null re-sends even if the set is unchanged. */
 	private Set<String> lastSharedWithBronzeman = Collections.emptySet();
@@ -251,6 +254,11 @@ public class TcgLockedPlugin extends Plugin
 	private boolean baselineEstablished;
 	private int sessionUnlocks;
 	private long lastUpdatedMs;
+	private boolean lockbookDirty = true;
+	private List<TcgLockedStatus.LockItem> cachedLockItems = Collections.emptyList();
+	private int cachedLockbookUnlocked;
+	private int cachedLockbookPooled;
+	private Map<String, Integer> cachedContributions = Collections.emptyMap();
 
 	@Provides
 	TcgLockedConfig provideConfig(ConfigManager configManager)
@@ -261,6 +269,8 @@ public class TcgLockedPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
+		started = true;
+		lifecycleGeneration++;
 		panel.setRefreshAction(this::manualRefresh);
 		panel.setConsentAction(this::setPoolConsent);
 		navButton = NavigationButton.builder()
@@ -333,6 +343,9 @@ public class TcgLockedPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
+		started = false;
+		lifecycleGeneration++;
+		withdrawFromApprovedMembers();
 		if (navButton != null)
 		{
 			clientToolbar.removeNavigation(navButton);
@@ -350,6 +363,7 @@ public class TcgLockedPlugin extends Plugin
 		saidCollectionLoaded = false;
 		poolConsent.invalidate();
 		lastBroadcast = null;
+		lastBroadcastOwned = Collections.emptySet();
 		// Withdraw the pooled cards from Bronzeman TCG: with this plugin off, the group's unlocks
 		// should stop applying there too rather than linger for the rest of the session.
 		shareUnlocksWithBronzeman();
@@ -372,6 +386,9 @@ public class TcgLockedPlugin extends Plugin
 		pendingUnlocks.clear();
 		unlockQuietTicks = -1;
 		seenItemIds.clear();
+		cachedLockItems = Collections.emptyList();
+		cachedContributions = Collections.emptyMap();
+		lockbookDirty = true;
 		seenProfileKey = null;
 		baselineEstablished = false;
 		sessionUnlocks = 0;
@@ -417,7 +434,20 @@ public class TcgLockedPlugin extends Plugin
 	{
 		if (TcgLockedConfig.GROUP.equals(event.getGroup()))
 		{
+			if ("partyShare".equals(event.getKey()))
+			{
+				if (config.partyShare())
+				{
+					lastBroadcast = null;
+					lastBroadcastOwned = Collections.emptySet();
+				}
+				else
+				{
+					withdrawFromApprovedMembers();
+				}
+			}
 			rebuildExtraAllow();
+			lockbookDirty = true;
 			scheduleRefresh();
 		}
 	}
@@ -483,6 +513,7 @@ public class TcgLockedPlugin extends Plugin
 	{
 		// New account/profile: drop the previous profile's collection (API data included),
 		// re-baseline silently (the cross-profile delta is not "unlocks"), and re-query.
+		withdrawFromApprovedMembers();
 		collectionReader.invalidate();
 		poolConsent.invalidate();
 		pooledKeys.clear();
@@ -492,6 +523,17 @@ public class TcgLockedPlugin extends Plugin
 		saidNoCollection = false;
 		saidCollectionLoaded = false;
 		seenProfileKey = null;
+		ownedLower = Collections.emptySet();
+		ownedNormalized = Collections.emptySet();
+		previousOwned.clear();
+		pendingUnlocks.clear();
+		unlockQuietTicks = -1;
+		recentUnlocks.clear();
+		sessionUnlocks = 0;
+		warnedViolationItemIds.clear();
+		partyProgress.clear();
+		lastBroadcast = null;
+		lockbookDirty = true;
 		baselineEstablished = false;
 		queryTcgApi();
 		apiQueryTicks = collectionReader.hasCollection() ? -1 : 0;
@@ -504,7 +546,7 @@ public class TcgLockedPlugin extends Plugin
 		// Party messages arrive off the client thread; defer so shared state stays single-threaded.
 		if (message != null)
 		{
-			clientThread.invokeLater(() -> handlePartyProgress(message));
+			invokeLaterIfStarted(() -> handlePartyProgress(message));
 		}
 	}
 
@@ -518,7 +560,17 @@ public class TcgLockedPlugin extends Plugin
 		partyProgress.put(message.getMemberId(),
 			new int[]{message.getCardsOwned(), message.getUnlocked(), message.getSeen()});
 
-		Set<String> sent = message.getOwnedKeys();
+		Set<String> sent = null;
+		String packed = message.getPackedOwnedKeys();
+		if (packed != null && packed.length() <= MAX_PARTY_PACKED_LENGTH)
+		{
+			sent = cardCatalog.unpackKeysOrNull(packed);
+		}
+		else if (packed == null && message.getOwnedKeys() != null)
+		{
+			// Compatibility with clients released before packed party collections.
+			sent = cardCatalog.filterKnownKeys(message.getOwnedKeys());
+		}
 		PartyMember from = partyService.getMemberById(message.getMemberId());
 		String partnerKey = from == null ? "" : rememberMemberKey(from);
 		if (sent != null && !partnerKey.isEmpty() && addressedToUs(message.getSharedWith()))
@@ -531,6 +583,7 @@ public class TcgLockedPlugin extends Plugin
 			{
 				pooledKeys.put(partnerKey, sent);
 				savePooledPartner(partnerKey, sent);
+				lockbookDirty = true;
 			}
 		}
 		if (firstContact)
@@ -546,7 +599,7 @@ public class TcgLockedPlugin extends Plugin
 	{
 		if (message != null)
 		{
-			clientThread.invokeLater(() -> handlePartyUnlock(message));
+			invokeLaterIfStarted(() -> handlePartyUnlock(message));
 		}
 	}
 
@@ -576,13 +629,20 @@ public class TcgLockedPlugin extends Plugin
 	public void onUserJoin(UserJoin event)
 	{
 		// Someone joined (or we joined and are seeing existing members): re-share our progress so they see us.
-		clientThread.invokeLater(() ->
+		invokeLaterIfStarted(() ->
 		{
 			broadcastProgress(true);
 			// They may have been offline when we unsynced them, in which case the withdrawal never
 			// reached them and they still hold our cards. Re-send it whenever a declined player is
 			// here; it is idempotent, so repeating it costs nothing.
-			withdrawFromDeclinedMembers();
+			if (config.partyShare())
+			{
+				withdrawFromDeclinedMembers();
+			}
+			else
+			{
+				withdrawFromApprovedMembers();
+			}
 			reportPoolPending();
 			publishStatus();
 		});
@@ -591,7 +651,7 @@ public class TcgLockedPlugin extends Plugin
 	@Subscribe
 	public void onUserPart(UserPart event)
 	{
-		clientThread.invokeLater(() ->
+		invokeLaterIfStarted(() ->
 		{
 			// Drop what only made sense while they were here: their live progress, and any collection
 			// they offered but was never approved. An APPROVED partner's cards deliberately survive —
@@ -637,9 +697,12 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return;
 		}
-		int[] current = new int[]{ownedLower.size(), countUnlockedSeen(), seenItemIds.size()};
+		rebuildLockbookIfNeeded();
+		int[] current = new int[]{ownedLower.size(), cachedLockbookUnlocked, seenItemIds.size()};
+		boolean collectionChanged = !ownedNormalized.equals(lastBroadcastOwned);
 		if (!force && lastBroadcast != null
-			&& lastBroadcast[0] == current[0] && lastBroadcast[1] == current[1] && lastBroadcast[2] == current[2])
+			&& lastBroadcast[0] == current[0] && lastBroadcast[1] == current[1] && lastBroadcast[2] == current[2]
+			&& !collectionChanged)
 		{
 			return;
 		}
@@ -654,7 +717,11 @@ public class TcgLockedPlugin extends Plugin
 		// share with the people you have synced without waiting on someone who is still undecided.
 		Set<String> audience = approvedMembersPresent();
 		message.setSharedWith(audience);
-		message.setOwnedKeys(audience.isEmpty() ? null : new HashSet<>(ownedNormalized));
+		if (!audience.isEmpty() && (force || collectionChanged))
+		{
+			message.setPackedOwnedKeys(cardCatalog.packKeys(ownedNormalized));
+			lastBroadcastOwned = Collections.unmodifiableSet(new HashSet<>(ownedNormalized));
+		}
 		partyService.send(message);
 	}
 
@@ -667,19 +734,6 @@ public class TcgLockedPlugin extends Plugin
 		TcgLockedPartyUnlockMessage message = new TcgLockedPartyUnlockMessage();
 		message.setItemName(itemName);
 		partyService.send(message);
-	}
-
-	private int countUnlockedSeen()
-	{
-		int unlocked = 0;
-		for (int id : seenItemIds)
-		{
-			if (isUnlocked(id))
-			{
-				unlocked++;
-			}
-		}
-		return unlocked;
 	}
 
 	@Subscribe
@@ -695,15 +749,12 @@ public class TcgLockedPlugin extends Plugin
 		// NPC interaction: block any action on a locked carded monster except Examine.
 		if (effGateNpcs() && !"examine".equals(verb))
 		{
-			MenuEntry[] entries = client.getMenuEntries();
-			if (entries.length > 0)
+			MenuEntry entry = event.getMenuEntry();
+			NPC npc = entry.getNpc();
+			if (npc != null && npc.getName() != null && !isNpcUnlocked(npc.getName()))
 			{
-				NPC npc = entries[entries.length - 1].getNpc();
-				if (npc != null && npc.getName() != null && !isNpcUnlocked(npc.getName()))
-				{
-					client.setMenuEntries(Arrays.copyOf(entries, entries.length - 1));
-					return;
-				}
+				removeMenuEntry(entry);
+				return;
 			}
 		}
 
@@ -719,11 +770,23 @@ public class TcgLockedPlugin extends Plugin
 			return;
 		}
 
-		// The just-added entry is the last element; drop it so the locked option can't be clicked.
+		removeMenuEntry(event.getMenuEntry());
+	}
+
+	private void removeMenuEntry(MenuEntry entry)
+	{
 		MenuEntry[] entries = client.getMenuEntries();
-		if (entries.length > 0)
+		List<MenuEntry> kept = new ArrayList<>(entries.length);
+		for (MenuEntry candidate : entries)
 		{
-			client.setMenuEntries(Arrays.copyOf(entries, entries.length - 1));
+			if (candidate != entry)
+			{
+				kept.add(candidate);
+			}
+		}
+		if (kept.size() != entries.length)
+		{
+			client.setMenuEntries(kept.toArray(new MenuEntry[0]));
 		}
 	}
 
@@ -731,18 +794,24 @@ public class TcgLockedPlugin extends Plugin
 	public void onMenuOptionClicked(MenuOptionClicked event)
 	{
 		// Backstop for any path that reaches a gated action without going through the menu strip above.
-		if (config.enforcement() != TcgLockedConfig.Enforcement.BLOCK || enforcementDeferred())
+		if (enforcementDeferred())
 		{
 			return;
 		}
+		boolean block = config.enforcement() == TcgLockedConfig.Enforcement.BLOCK;
 
 		// NPC backstop.
 		if (effGateNpcs() && NPC_ACTIONS.contains(event.getMenuAction()))
 		{
-			String npcName = stripNpcTarget(event.getMenuTarget());
+			NPC npc = event.getMenuEntry().getNpc();
+			String npcName = npc != null && npc.getName() != null
+				? npc.getName() : stripNpcTarget(event.getMenuTarget());
 			if (!npcName.isEmpty() && !isNpcUnlocked(npcName))
 			{
-				event.consume();
+				if (block)
+				{
+					event.consume();
+				}
 				warn("Locked: you don't own the card for " + npcName + ".");
 				return;
 			}
@@ -760,7 +829,10 @@ public class TcgLockedPlugin extends Plugin
 			return;
 		}
 
-		event.consume();
+		if (block)
+		{
+			event.consume();
+		}
 		warn("Locked: you don't own the card for " + itemName(itemId) + ".");
 	}
 
@@ -811,6 +883,7 @@ public class TcgLockedPlugin extends Plugin
 		}
 		if (grew)
 		{
+			lockbookDirty = true;
 			saveSeenItems();
 		}
 	}
@@ -828,7 +901,7 @@ public class TcgLockedPlugin extends Plugin
 		for (Item item : worn.getItems())
 		{
 			int id = item.getId();
-			if (id <= 0 || isUnlocked(id))
+			if (id <= 0 || !effGateEquipment() || isUnlocked(id))
 			{
 				continue;
 			}
@@ -855,7 +928,7 @@ public class TcgLockedPlugin extends Plugin
 		for (Item item : inventory.getItems())
 		{
 			int id = item.getId();
-			if (id <= 0 || isUnlocked(id))
+			if (id <= 0 || !isItemLockedByPreset(id))
 			{
 				continue;
 			}
@@ -866,7 +939,19 @@ public class TcgLockedPlugin extends Plugin
 
 	private void scheduleRefresh()
 	{
-		clientThread.invokeLater(this::refreshOwned);
+		invokeLaterIfStarted(this::refreshOwned);
+	}
+
+	private void invokeLaterIfStarted(Runnable action)
+	{
+		final int generation = lifecycleGeneration;
+		clientThread.invokeLater(() ->
+		{
+			if (started && lifecycleGeneration == generation)
+			{
+				action.run();
+			}
+		});
 	}
 
 	private void manualRefresh()
@@ -880,6 +965,8 @@ public class TcgLockedPlugin extends Plugin
 	/** Runs on the client thread (scheduled via {@link #scheduleRefresh()}), so unlock-diff state has no races. */
 	private void refreshOwned()
 	{
+		lastUpdatedMs = System.currentTimeMillis();
+		lockbookDirty = true;
 		// Load this profile's lockbook once the RS profile is available (first refresh after login).
 		String profileKey = configManager.getRSProfileKey();
 		if (profileKey != null && !profileKey.equals(seenProfileKey))
@@ -1058,8 +1145,47 @@ public class TcgLockedPlugin extends Plugin
 
 	private void publishStatus()
 	{
-		lastUpdatedMs = System.currentTimeMillis();
 		prunePartyStateWhenAlone();
+		rebuildLockbookIfNeeded();
+
+		int unlocked = cachedLockbookUnlocked;
+		int pooled = cachedLockbookPooled;
+		Map<String, Integer> contributions = cachedContributions;
+		List<TcgLockedStatus.LockItem> lockItems = cachedLockItems;
+
+		Set<String> pooledCardKeys = new HashSet<>();
+		for (Set<String> keys : pooledKeys.values())
+		{
+			if (keys != null)
+			{
+				pooledCardKeys.addAll(keys);
+			}
+		}
+
+		TcgLockedStatus status = new TcgLockedStatus(
+			isCollectionLoaded(), ownedLower.size(), sessionUnlocks, enforcementLabel(),
+			new ArrayList<>(recentUnlocks), lockedInBagNames, equippedViolationNames, lockItems,
+			seenItemIds.size(), unlocked, pooled, pooledCardKeys.size(), sharingBlockedBy(),
+			buildPartyEntries(unlocked, contributions), lastUpdatedMs);
+		final int generation = lifecycleGeneration;
+		SwingUtilities.invokeLater(() ->
+		{
+			if (started && lifecycleGeneration == generation)
+			{
+				panel.update(status);
+			}
+		});
+
+		broadcastProgress(false);
+		shareUnlocksWithBronzeman();
+	}
+
+	private void rebuildLockbookIfNeeded()
+	{
+		if (!lockbookDirty)
+		{
+			return;
+		}
 
 		List<TcgLockedStatus.LockItem> all = new ArrayList<>(seenItemIds.size());
 		int unlocked = 0;
@@ -1090,39 +1216,11 @@ public class TcgLockedPlugin extends Plugin
 				id, name.isEmpty() ? "Item" : name, locked, source, unlockedBy));
 		}
 		all.sort(Comparator.comparing(li -> li.name.toLowerCase(Locale.ROOT)));
-		List<TcgLockedStatus.LockItem> lockItems = all.size() > LOCKBOOK_CAP
-			? new ArrayList<>(all.subList(0, LOCKBOOK_CAP))
-			: all;
-
-		Set<String> pooledCardKeys = new HashSet<>();
-		for (Set<String> keys : pooledKeys.values())
-		{
-			if (keys != null)
-			{
-				pooledCardKeys.addAll(keys);
-			}
-		}
-
-		TcgLockedStatus status = new TcgLockedStatus(
-			isCollectionLoaded(),
-			ownedLower.size(),
-			sessionUnlocks,
-			enforcementLabel(),
-			new ArrayList<>(recentUnlocks),
-			lockedInBagNames,
-			equippedViolationNames,
-			lockItems,
-			seenItemIds.size(),
-			unlocked,
-			pooled,
-			pooledCardKeys.size(),
-			sharingBlockedBy(),
-			buildPartyEntries(unlocked, contributions),
-			lastUpdatedMs);
-		SwingUtilities.invokeLater(() -> panel.update(status));
-
-		broadcastProgress(false);
-		shareUnlocksWithBronzeman();
+		cachedLockItems = Collections.unmodifiableList(all);
+		cachedLockbookUnlocked = unlocked;
+		cachedLockbookPooled = pooled;
+		cachedContributions = Collections.unmodifiableMap(contributions);
+		lockbookDirty = false;
 	}
 
 	/**
@@ -1251,6 +1349,7 @@ public class TcgLockedPlugin extends Plugin
 	private void loadSeenItems()
 	{
 		seenItemIds.clear();
+		lockbookDirty = true;
 		String csv = configManager.getRSProfileConfiguration(TcgLockedConfig.GROUP, SEEN_ITEMS_KEY);
 		if (csv == null || csv.isEmpty())
 		{
@@ -1298,6 +1397,27 @@ public class TcgLockedPlugin extends Plugin
 			return true;
 		}
 		return effGateConsumables() && CONSUME_VERBS.contains(verb);
+	}
+
+	boolean isItemLockedByPreset(int itemId)
+	{
+		if (isUnlocked(itemId))
+		{
+			return false;
+		}
+		String[] actions = itemManager.getItemComposition(itemManager.canonicalize(itemId)).getInventoryActions();
+		if (actions == null)
+		{
+			return false;
+		}
+		for (String action : actions)
+		{
+			if (action != null && isGatedVerb(action.toLowerCase(Locale.ROOT).trim()))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	// The difficulty preset overrides the individual toggles unless it is Custom.
@@ -1579,7 +1699,7 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return;
 		}
-		clientThread.invokeLater(() ->
+		invokeLaterIfStarted(() ->
 		{
 			if (approved)
 			{
@@ -1602,6 +1722,7 @@ public class TcgLockedPlugin extends Plugin
 				// they keep everything already sent, saved to disk, indefinitely.
 				sendWithdraw(key);
 			}
+			lockbookDirty = true;
 			// Our own keys only go out once everyone present is approved, so a decision changes what
 			// we broadcast as well as what we apply.
 			broadcastProgress(true);
@@ -1638,6 +1759,33 @@ public class TcgLockedPlugin extends Plugin
 		}
 	}
 
+	/** Retracts our cards from every approved member currently able to receive the message. */
+	private void withdrawFromApprovedMembers()
+	{
+		if (!partyService.isInParty())
+		{
+			return;
+		}
+		List<PartyMember> members = partyService.getMembers();
+		PartyMember local = partyService.getLocalMember();
+		long localId = local != null ? local.getMemberId() : -1L;
+		if (members == null)
+		{
+			return;
+		}
+		for (PartyMember member : members)
+		{
+			if (member.getMemberId() != localId && poolConsent.isApproved(member.getDisplayName()))
+			{
+				String key = rememberMemberKey(member);
+				if (!key.isEmpty())
+				{
+					sendWithdraw(key);
+				}
+			}
+		}
+	}
+
 	/** Tells a player to stop using our cards. Harmless if they aren't listening or already dropped them. */
 	private void sendWithdraw(String partnerKey)
 	{
@@ -1655,7 +1803,7 @@ public class TcgLockedPlugin extends Plugin
 	{
 		if (message != null)
 		{
-			clientThread.invokeLater(() -> handlePartyWithdraw(message));
+			invokeLaterIfStarted(() -> handlePartyWithdraw(message));
 		}
 	}
 
@@ -1688,6 +1836,7 @@ public class TcgLockedPlugin extends Plugin
 		forgetPooledPartner(senderKey);
 		if (had)
 		{
+			lockbookDirty = true;
 			chat(from.getDisplayName().trim() + " stopped sharing their cards with you.");
 			refreshOwned();
 		}
@@ -1726,6 +1875,7 @@ public class TcgLockedPlugin extends Plugin
 	private void loadPooledPartners()
 	{
 		pooledKeys.clear();
+		lockbookDirty = true;
 		for (String partnerKey : readPooledPartnerNames())
 		{
 			if (!poolConsent.isApproved(partnerKey))
@@ -1740,6 +1890,10 @@ public class TcgLockedPlugin extends Plugin
 			if (!keys.isEmpty())
 			{
 				pooledKeys.put(partnerKey, keys);
+			}
+			else if (packed != null && !packed.isEmpty())
+			{
+				forgetPooledPartner(partnerKey);
 			}
 		}
 	}
