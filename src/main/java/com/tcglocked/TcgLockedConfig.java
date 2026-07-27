@@ -233,11 +233,23 @@ public interface TcgLockedConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "showUnlockOutlines",
+		name = "Unlock outlines",
+		description = "Outline NPCs and items: green when unlocked, red when locked, and purple when no card exists.",
+		section = FEEDBACK,
+		position = 5
+	)
+	default boolean showUnlockOutlines()
+	{
+		return false;
+	}
+
+	@ConfigItem(
 		keyName = "showOverlay",
 		name = "Show violation overlay",
 		description = "Show an overlay listing locked items you currently have equipped.",
 		section = FEEDBACK,
-		position = 5
+		position = 6
 	)
 	default boolean showOverlay()
 	{
@@ -249,7 +261,7 @@ public interface TcgLockedConfig extends Config
 		name = "Warn in chat",
 		description = "Post a game message when a locked item ends up equipped.",
 		section = FEEDBACK,
-		position = 6
+		position = 7
 	)
 	default boolean warnInChat()
 	{
@@ -262,7 +274,7 @@ public interface TcgLockedConfig extends Config
 		description = "When in a RuneLite party, share your unlock progress and announce your unlocks, and show a "
 			+ "party progress list in the panel.",
 		section = FEEDBACK,
-		position = 7
+		position = 8
 	)
 	default boolean partyShare()
 	{

@@ -150,6 +150,9 @@ public class TcgLockedPlugin extends Plugin
 	private TcgLockedItemOverlay itemOverlay;
 
 	@Inject
+	private TcgLockedSceneOutlineOverlay sceneOutlineOverlay;
+
+	@Inject
 	private TcgLockedRevealOverlay revealOverlay;
 
 	@Inject
@@ -296,6 +299,7 @@ public class TcgLockedPlugin extends Plugin
 
 		overlayManager.add(overlay);
 		overlayManager.add(itemOverlay);
+		overlayManager.add(sceneOutlineOverlay);
 		// overlayManager.add(revealOverlay); // disabled with the reveal, see showPendingUnlocks
 
 		rebuildExtraAllow();
@@ -381,6 +385,7 @@ public class TcgLockedPlugin extends Plugin
 
 		overlayManager.remove(overlay);
 		overlayManager.remove(itemOverlay);
+		overlayManager.remove(sceneOutlineOverlay);
 		overlayManager.remove(revealOverlay);
 		revealOverlay.clear();
 
@@ -2021,6 +2026,18 @@ public class TcgLockedPlugin extends Plugin
 			}
 		}
 		return false;
+	}
+
+	/** Returns the NPC's outline state using the same collection, allow-list and party rules as enforcement. */
+	TcgLockedHighlightState npcHighlightState(String npcName)
+	{
+		return TcgLockedHighlightState.forNpc(
+			collectionReader.hasCollection(),
+			npcName,
+			cardCatalog,
+			card -> ownedNormalized.contains(card)
+				|| extraAllowNormalized.contains(card)
+				|| unlockedByParty(card));
 	}
 
 	/** Strips colour tags and a trailing "(level-N)" from an NPC menu target to recover the plain name. */
