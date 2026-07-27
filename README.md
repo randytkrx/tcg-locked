@@ -18,6 +18,9 @@ have no card at all, so there would be nothing to collect to open them up, and
 locking those would be a permanent dead end rather than a goal. They are left
 alone, the same way monsters with no card are.
 
+An optional outline setting marks NPCs and items green when unlocked, red when
+locked, and purple when no matching card exists.
+
 ## What gets locked
 
 Equipment is locked by default, so you cannot wield or wear gear without its card.

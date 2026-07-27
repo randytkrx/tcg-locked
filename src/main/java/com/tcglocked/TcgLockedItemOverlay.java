@@ -29,14 +29,15 @@ import net.runelite.api.widgets.WidgetItem;
 import net.runelite.client.ui.overlay.WidgetItemOverlay;
 
 /**
- * Dims and draws a small padlock on inventory / bank / equipment items the player does not own a card for.
- * Padlocks show collection ownership even when the active preset has no menu action to block for that item.
+ * Draws inventory / bank / equipment feedback. Locked items retain their existing dimming and
+ * padlock, while the optional outline uses the same unlock-state colors as the scene overlay.
  */
 class TcgLockedItemOverlay extends WidgetItemOverlay
 {
 	private static final Color TINT = new Color(0, 0, 0, 130);
 	private static final Color LOCK_FILL = new Color(230, 230, 230);
 	private static final Color LOCK_OUTLINE = new Color(30, 30, 30, 200);
+	private static final float OUTLINE_WIDTH = 2.0f;
 
 	private final TcgLockedPlugin plugin;
 	private final TcgLockedConfig config;
@@ -54,12 +55,9 @@ class TcgLockedItemOverlay extends WidgetItemOverlay
 	@Override
 	public void renderItemOverlay(Graphics2D graphics, int itemId, WidgetItem widgetItem)
 	{
-		if (!config.showLockIcons() || plugin.enforcementDeferred())
-		{
-			// Deferred: Bronzeman TCG draws its own lock icons — avoid double padlocks.
-			return;
-		}
-		if (plugin.isUnlocked(itemId))
+		boolean showLockIcon = config.showLockIcons() && !plugin.enforcementDeferred();
+		boolean showOutline = config.showUnlockOutlines();
+		if ((!showLockIcon && !showOutline) || !plugin.isCollectionLoaded())
 		{
 			return;
 		}
@@ -70,9 +68,41 @@ class TcgLockedItemOverlay extends WidgetItemOverlay
 			return;
 		}
 
-		graphics.setColor(TINT);
-		graphics.fill(bounds);
-		drawPadlock(graphics, bounds);
+		TcgLockedHighlightState state =
+			TcgLockedHighlightState.fromItemSource(plugin.unlockSourceFor(itemId));
+		if (showLockIcon && state == TcgLockedHighlightState.LOCKED)
+		{
+			graphics.setColor(TINT);
+			graphics.fill(bounds);
+			drawPadlock(graphics, bounds);
+		}
+		if (showOutline)
+		{
+			drawOutline(graphics, bounds, state.getColor());
+		}
+	}
+
+	private static void drawOutline(Graphics2D graphics, Rectangle bounds, Color color)
+	{
+		Object prevAa = graphics.getRenderingHint(RenderingHints.KEY_ANTIALIASING);
+		Stroke prevStroke = graphics.getStroke();
+		Color prevColor = graphics.getColor();
+		graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+		graphics.setStroke(new BasicStroke(OUTLINE_WIDTH));
+		graphics.setColor(color);
+		graphics.draw(new RoundRectangle2D.Double(
+			bounds.x + 1.0,
+			bounds.y + 1.0,
+			Math.max(0.0, bounds.width - 2.0),
+			Math.max(0.0, bounds.height - 2.0),
+			4.0,
+			4.0));
+		graphics.setColor(prevColor);
+		graphics.setStroke(prevStroke);
+		if (prevAa != null)
+		{
+			graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, prevAa);
+		}
 	}
 
 	/** Draws a small vector padlock in the top-left corner of the slot; no image asset needed. */
