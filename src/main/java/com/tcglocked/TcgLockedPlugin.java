@@ -52,6 +52,7 @@ import net.runelite.api.widgets.WidgetUtil;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.game.FishingSpot;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.party.PartyMember;
@@ -91,6 +92,9 @@ public class TcgLockedPlugin extends Plugin
 	private static final int RECENT_UNLOCK_CAP = 30;
 	/** Splits a use-on menu target, as in "Knife -> Yew tree". */
 	private static final String USED_ON_SEPARATOR = " -> ";
+	/** Leading Make-X quantity, as in "5 x Bread". Precompiled: this runs on the menu hot path. */
+	private static final java.util.regex.Pattern PRODUCT_QUANTITY =
+		java.util.regex.Pattern.compile("^\\s*\\d+\\s*x\\s*", java.util.regex.Pattern.CASE_INSENSITIVE);
 	private static final int MAX_PARTY_PACKED_LENGTH = 16_384;
 
 	// OSRS TCG's PluginMessage API (its OwnedCardNamesApiService). We post a query; it replies
@@ -806,8 +810,8 @@ public class TcgLockedPlugin extends Plugin
 		if (!"examine".equals(verb))
 		{
 			MenuEntry entry = event.getMenuEntry();
-			String target = stripNpcTarget(event.getTarget());
-			if (missingForInteraction(entry.getType(), entry.getParam1(), target, verb) != null)
+			if (missingForInteraction(entry.getType(), entry.getParam1(), event.getTarget(), verb,
+				entry.getNpc()) != null)
 			{
 				removeMenuEntry(entry);
 				return;
@@ -879,7 +883,7 @@ public class TcgLockedPlugin extends Plugin
 		if (!"examine".equals(verb))
 		{
 			String missing = missingForInteraction(event.getMenuAction(), event.getParam1(),
-				stripNpcTarget(event.getMenuTarget()), verb);
+				event.getMenuTarget(), verb, event.getMenuEntry().getNpc());
 			if (missing != null)
 			{
 				if (block)
@@ -1597,44 +1601,91 @@ public class TcgLockedPlugin extends Plugin
 	 * kind is derived from the action so one lookup covers objects, NPCs, fishing spots, item-on-object
 	 * and interface flows.
 	 */
-	private String missingForInteraction(MenuAction action, int widgetId, String target, String option)
+	private String missingForInteraction(MenuAction action, int widgetId, String rawTarget, String option)
 	{
-		if (!effGateActivities() || !collectionReader.hasCollection() || target == null || target.isEmpty())
+		return missingForInteraction(action, widgetId, rawTarget, option, null);
+	}
+
+	/**
+	 * @param npc the NPC being acted on, when there is one. Fishing spots share the display name
+	 * "Fishing spot" across every catch, so the catalog keys them by RuneLite's {@link FishingSpot}
+	 * enum name instead, which is only reachable from the NPC id.
+	 */
+	private String missingForInteraction(MenuAction action, int widgetId, String rawTarget, String option,
+		NPC npc)
+	{
+		// Ordered cheapest-first on purpose. This runs for every menu entry, every time the menu is
+		// rebuilt, and the name normalizer is regex-heavy — so the config read and the enum switch
+		// come before any string work, and most entries (Walk here, Cancel, bank clicks) stop here.
+		if (!effGateActivities())
 		{
 			return null;
 		}
-		String name = target;
+		List<String> kinds = kindsFor(action, widgetId);
+		if (kinds.isEmpty() || !collectionReader.hasCollection())
+		{
+			return null;
+		}
+
+		String target = stripNpcTarget(rawTarget);
+		if (target.isEmpty())
+		{
+			return null;
+		}
 
 		// "Knife -> Yew tree". Item-on-object entries are keyed on the item being used, with the
-		// object name standing in for the menu option, so both halves are needed. Try that reading
-		// first, then fall back to treating the object as an ordinary target.
+		// object name standing in for the menu option, so both halves are needed.
+		String usedItem = null;
+		String objectName = null;
 		int separator = target.lastIndexOf(USED_ON_SEPARATOR);
 		if (separator >= 0)
 		{
-			String usedItem = stripProductQuantity(target.substring(0, separator));
-			String objectName = target.substring(separator + USED_ON_SEPARATOR.length()).trim();
-			String missing = interactionGate.firstMissing(TcgInteractionCatalog.KIND_ITEM_ON_OBJECT,
-				usedItem, objectName, this::ownsNormalizedCard);
-			if (missing != null)
+			usedItem = stripProductQuantity(target.substring(0, separator));
+			objectName = target.substring(separator + USED_ON_SEPARATOR.length()).trim();
+		}
+		// With no separator the target is the thing itself; with one, the object is what the other
+		// kinds should be matched against.
+		String plainName = stripProductQuantity(objectName == null ? target : objectName);
+
+		// "Fishing spot" is shared by every catch method, so the display name cannot identify one.
+		// RuneLite owns the authoritative id -> spot mapping; its enum name is what the catalog uses.
+		String spotName = null;
+		if (npc != null)
+		{
+			FishingSpot spot = FishingSpot.findSpot(npc.getId());
+			if (spot != null)
 			{
-				return missing;
+				spotName = spot.name();
 			}
-			name = objectName;
 		}
 
-		name = stripProductQuantity(name);
-		if (name.isEmpty())
+		for (String kind : kinds)
 		{
-			return null;
-		}
-		for (String kind : kindsFor(action, widgetId))
-		{
+			final String missing;
 			if (TcgInteractionCatalog.KIND_ITEM_ON_OBJECT.equals(kind))
 			{
-				// Already handled above, where both halves of the target were still available.
-				continue;
+				if (usedItem == null || usedItem.isEmpty())
+				{
+					continue;
+				}
+				missing = interactionGate.firstMissing(kind, usedItem, objectName, this::ownsNormalizedCard);
 			}
-			String missing = interactionGate.firstMissing(kind, name, option, this::ownsNormalizedCard);
+			else if (TcgInteractionCatalog.KIND_FISHING_SPOT.equals(kind))
+			{
+				if (spotName == null)
+				{
+					continue;
+				}
+				missing = interactionGate.firstMissing(kind, spotName, option, this::ownsNormalizedCard);
+			}
+			else
+			{
+				if (plainName.isEmpty())
+				{
+					continue;
+				}
+				missing = interactionGate.firstMissing(kind, plainName, option, this::ownsNormalizedCard);
+			}
 			if (missing != null)
 			{
 				return missing;
@@ -1721,7 +1772,7 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return "";
 		}
-		return target.replaceFirst("^\\s*\\d+\\s*x\\s*", "").trim();
+		return PRODUCT_QUANTITY.matcher(target).replaceFirst("").trim();
 	}
 
 	/**
