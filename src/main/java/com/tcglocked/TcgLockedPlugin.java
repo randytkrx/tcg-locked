@@ -45,8 +45,10 @@ import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.events.MenuOptionClicked;
+import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.VarbitID;
+import net.runelite.api.widgets.WidgetUtil;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -87,6 +89,8 @@ public class TcgLockedPlugin extends Plugin
 	private static final String POOLED_PARTNERS_KEY = "pooledPartners";
 	private static final String POOLED_PREFIX = "pooled_";
 	private static final int RECENT_UNLOCK_CAP = 30;
+	/** Splits a use-on menu target, as in "Knife -> Yew tree". */
+	private static final String USED_ON_SEPARATOR = " -> ";
 	private static final int MAX_PARTY_PACKED_LENGTH = 16_384;
 
 	// OSRS TCG's PluginMessage API (its OwnedCardNamesApiService). We post a query; it replies
@@ -803,7 +807,7 @@ public class TcgLockedPlugin extends Plugin
 		{
 			MenuEntry entry = event.getMenuEntry();
 			String target = stripNpcTarget(event.getTarget());
-			if (missingForInteraction(entry.getType(), target, verb) != null)
+			if (missingForInteraction(entry.getType(), entry.getParam1(), target, verb) != null)
 			{
 				removeMenuEntry(entry);
 				return;
@@ -874,7 +878,7 @@ public class TcgLockedPlugin extends Plugin
 		// Activity backstop, for one-click and keybound paths that never raise a menu entry.
 		if (!"examine".equals(verb))
 		{
-			String missing = missingForInteraction(event.getMenuAction(),
+			String missing = missingForInteraction(event.getMenuAction(), event.getParam1(),
 				stripNpcTarget(event.getMenuTarget()), verb);
 			if (missing != null)
 			{
@@ -1436,6 +1440,12 @@ public class TcgLockedPlugin extends Plugin
 			// here while everything works would reasonably report the plugin as broken.
 			return "Waiting for OSRS TCG";
 		}
+		if (inLastManStanding())
+		{
+			// Checked before the hand-off so the panel never credits Bronzeman for a pause it
+			// had nothing to do with.
+			return "Paused in Last Man Standing";
+		}
 		if (enforcementSuspended())
 		{
 			return "Locking by Bronzeman TCG";
@@ -1587,15 +1597,44 @@ public class TcgLockedPlugin extends Plugin
 	 * kind is derived from the action so one lookup covers objects, NPCs, fishing spots, item-on-object
 	 * and interface flows.
 	 */
-	private String missingForInteraction(MenuAction action, String target, String option)
+	private String missingForInteraction(MenuAction action, int widgetId, String target, String option)
 	{
 		if (!effGateActivities() || !collectionReader.hasCollection() || target == null || target.isEmpty())
 		{
 			return null;
 		}
-		for (String kind : kindsFor(action))
+		String name = target;
+
+		// "Knife -> Yew tree". Item-on-object entries are keyed on the item being used, with the
+		// object name standing in for the menu option, so both halves are needed. Try that reading
+		// first, then fall back to treating the object as an ordinary target.
+		int separator = target.lastIndexOf(USED_ON_SEPARATOR);
+		if (separator >= 0)
 		{
-			String missing = interactionGate.firstMissing(kind, target, option, this::ownsNormalizedCard);
+			String usedItem = stripProductQuantity(target.substring(0, separator));
+			String objectName = target.substring(separator + USED_ON_SEPARATOR.length()).trim();
+			String missing = interactionGate.firstMissing(TcgInteractionCatalog.KIND_ITEM_ON_OBJECT,
+				usedItem, objectName, this::ownsNormalizedCard);
+			if (missing != null)
+			{
+				return missing;
+			}
+			name = objectName;
+		}
+
+		name = stripProductQuantity(name);
+		if (name.isEmpty())
+		{
+			return null;
+		}
+		for (String kind : kindsFor(action, widgetId))
+		{
+			if (TcgInteractionCatalog.KIND_ITEM_ON_OBJECT.equals(kind))
+			{
+				// Already handled above, where both halves of the target were still available.
+				continue;
+			}
+			String missing = interactionGate.firstMissing(kind, name, option, this::ownsNormalizedCard);
 			if (missing != null)
 			{
 				return missing;
@@ -1605,11 +1644,17 @@ public class TcgLockedPlugin extends Plugin
 	}
 
 	/**
-	 * Menu actions map to more than one catalog kind: an NPC action can be a plain NPC or a fishing
-	 * spot, and a widget click can be an interface or an inventory entry. Trying both is cheaper
-	 * than tracking which is which, and a miss just returns no rule.
+	 * Which catalog kinds a menu action could be gated by.
+	 *
+	 * <p>Widget clicks are scoped by interface group, and that scoping is load-bearing rather than
+	 * tidiness. Interface entries are named after products — "Bread", "Anchovies", "Bass" — and a
+	 * bank withdrawal, shop purchase or Grand Exchange search carries the very same target text. A
+	 * blanket widget mapping would gate all of those, so only the Make-X dialogs qualify.
+	 *
+	 * <p>Where an action genuinely is ambiguous, both kinds are tried: an NPC action may be a plain
+	 * NPC or a fishing spot, and a miss simply finds no rule.
 	 */
-	private static List<String> kindsFor(MenuAction action)
+	static List<String> kindsFor(MenuAction action, int widgetId)
 	{
 		switch (action)
 		{
@@ -1637,7 +1682,6 @@ public class TcgLockedPlugin extends Plugin
 			case WIDGET_THIRD_OPTION:
 			case WIDGET_FOURTH_OPTION:
 			case WIDGET_FIFTH_OPTION:
-				return List.of(TcgInteractionCatalog.KIND_INTERFACE, TcgInteractionCatalog.KIND_INVENTORY);
 			case ITEM_FIRST_OPTION:
 			case ITEM_SECOND_OPTION:
 			case ITEM_THIRD_OPTION:
@@ -1645,10 +1689,39 @@ public class TcgLockedPlugin extends Plugin
 			case ITEM_FIFTH_OPTION:
 			case ITEM_USE:
 			case ITEM_USE_ON_ITEM:
+				return kindsForWidget(widgetId);
+			default:
+				return List.of();
+		}
+	}
+
+	private static List<String> kindsForWidget(int widgetId)
+	{
+		if (widgetId <= 0)
+		{
+			return List.of();
+		}
+		switch (WidgetUtil.componentToInterface(widgetId))
+		{
+			case InterfaceID.SKILLMULTI:
+			case InterfaceID.SMITHING:
+				// Make-X product click: the product name is the only reliable signal.
+				return List.of(TcgInteractionCatalog.KIND_INTERFACE);
+			case InterfaceID.INVENTORY:
 				return List.of(TcgInteractionCatalog.KIND_INVENTORY);
 			default:
 				return List.of();
 		}
+	}
+
+	/** Make-X targets arrive as "5 x Bread" or "Bread"; the catalog is keyed on the bare name. */
+	private static String stripProductQuantity(String target)
+	{
+		if (target == null)
+		{
+			return "";
+		}
+		return target.replaceFirst("^\\s*\\d+\\s*x\\s*", "").trim();
 	}
 
 	/**

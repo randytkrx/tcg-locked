@@ -84,4 +84,35 @@ public class TcgInteractionGateTest
 	{
 		assertNull(gateOf(COOKING).firstMissing("interface", null, "Cook", owning()));
 	}
+
+	/**
+	 * item-on-object entries are keyed on the item being used, with the object name in the options
+	 * list. Getting this the wrong way round silently disables every rule of that kind.
+	 */
+	private static final String BREAD_ON_RANGE = "{\"nodes\":[{\"category\":\"cooking\","
+		+ "\"kind\":\"item-on-object\",\"name\":\"Bread dough\","
+		+ "\"options\":[\"cooking range\",\"range\",\"stove\"],"
+		+ "\"requiredCardGroups\":[[\"Bread dough\"],[\"Bread\"]]}]}";
+
+	@Test
+	public void itemOnObjectIsKeyedOnTheItemWithTheObjectAsOption()
+	{
+		assertEquals("Bread dough", gateOf(BREAD_ON_RANGE)
+			.firstMissing("item-on-object", "Bread dough", "Cooking range", owning()));
+	}
+
+	@Test
+	public void itemOnObjectAllowsWhenBothCardsOwned()
+	{
+		assertNull(gateOf(BREAD_ON_RANGE)
+			.firstMissing("item-on-object", "Bread dough", "Range", owning("bread dough", "bread")));
+	}
+
+	@Test
+	public void itemOnObjectIgnoresAnUnlistedObject()
+	{
+		// Bread cannot be cooked on an open fire, so that object is not in the options list.
+		assertNull(gateOf(BREAD_ON_RANGE)
+			.firstMissing("item-on-object", "Bread dough", "Fire", owning()));
+	}
 }
