@@ -46,6 +46,7 @@ import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.gameval.InventoryID;
+import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -166,6 +167,9 @@ public class TcgLockedPlugin extends Plugin
 
 	@Inject
 	private TcgSharedCatalogManager sharedCatalogManager;
+
+	@Inject
+	private TcgInteractionGate interactionGate;
 
 	@Inject
 	private net.runelite.client.eventbus.EventBus eventBus;
@@ -326,13 +330,15 @@ public class TcgLockedPlugin extends Plugin
 	}
 
 	/**
-	 * True when locking is handed off to Bronzeman TCG (it's enabled and the user kept the
-	 * default compatibility setting). Our menu-stripping, padlocks and warnings stand down;
-	 * the lockbook, reveals, panel and party features keep running.
+	 * True when our menu-stripping, padlocks and warnings stand down. Two reasons: locking is
+	 * handed off to Bronzeman TCG (it's enabled and the user kept the default compatibility
+	 * setting), or the player is in Last Man Standing, which issues its own kit and would other-
+	 * wise leave them locked out of gear in a fight they cannot leave. The lockbook, reveals,
+	 * panel and party features keep running either way.
 	 */
-	boolean enforcementDeferred()
+	boolean enforcementSuspended()
 	{
-		return config.deferToBronzeman() && bronzemanActive;
+		return (config.deferToBronzeman() && bronzemanActive) || inLastManStanding();
 	}
 
 	@Subscribe
@@ -773,7 +779,7 @@ public class TcgLockedPlugin extends Plugin
 	@Subscribe
 	public void onMenuEntryAdded(MenuEntryAdded event)
 	{
-		if (config.enforcement() != TcgLockedConfig.Enforcement.BLOCK || enforcementDeferred())
+		if (config.enforcement() != TcgLockedConfig.Enforcement.BLOCK || enforcementSuspended())
 		{
 			return;
 		}
@@ -786,6 +792,18 @@ public class TcgLockedPlugin extends Plugin
 			MenuEntry entry = event.getMenuEntry();
 			NPC npc = entry.getNpc();
 			if (npc != null && npc.getName() != null && !isNpcUnlocked(npc.getName()))
+			{
+				removeMenuEntry(entry);
+				return;
+			}
+		}
+
+		// Activity interaction: block gathering, production and thieving actions whose cards are missing.
+		if (!"examine".equals(verb))
+		{
+			MenuEntry entry = event.getMenuEntry();
+			String target = stripNpcTarget(event.getTarget());
+			if (missingForInteraction(entry.getType(), target, verb) != null)
 			{
 				removeMenuEntry(entry);
 				return;
@@ -828,7 +846,7 @@ public class TcgLockedPlugin extends Plugin
 	public void onMenuOptionClicked(MenuOptionClicked event)
 	{
 		// Backstop for any path that reaches a gated action without going through the menu strip above.
-		if (enforcementDeferred())
+		if (enforcementSuspended())
 		{
 			return;
 		}
@@ -852,6 +870,23 @@ public class TcgLockedPlugin extends Plugin
 		}
 
 		String verb = event.getMenuOption() == null ? "" : event.getMenuOption().toLowerCase(Locale.ROOT).trim();
+
+		// Activity backstop, for one-click and keybound paths that never raise a menu entry.
+		if (!"examine".equals(verb))
+		{
+			String missing = missingForInteraction(event.getMenuAction(),
+				stripNpcTarget(event.getMenuTarget()), verb);
+			if (missing != null)
+			{
+				if (block)
+				{
+					event.consume();
+				}
+				warn("Locked: you don't own the card for " + missing + ".");
+				return;
+			}
+		}
+
 		if (!isGatedVerb(verb))
 		{
 			return;
@@ -1401,7 +1436,7 @@ public class TcgLockedPlugin extends Plugin
 			// here while everything works would reasonably report the plugin as broken.
 			return "Waiting for OSRS TCG";
 		}
-		if (enforcementDeferred())
+		if (enforcementSuspended())
 		{
 			return "Locking by Bronzeman TCG";
 		}
@@ -1511,6 +1546,108 @@ public class TcgLockedPlugin extends Plugin
 				return true;
 			default:
 				return false;
+		}
+	}
+
+	private boolean effGateActivities()
+	{
+		switch (config.preset())
+		{
+			case CUSTOM:
+				return config.gateActivities();
+			case EVERYTHING:
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	/**
+	 * Last Man Standing hands out its own kit, so enforcing there would leave the player holding
+	 * gear they cannot use in a fight they cannot leave. Restrictions stand everywhere else.
+	 */
+	private boolean inLastManStanding()
+	{
+		return client.getVarbitValue(VarbitID.BR_INGAME) == 1;
+	}
+
+	/**
+	 * @return true if a card counts as owned for gating: the player pulled it, it is allow-listed,
+	 * or an approved party member is lending it. Takes an already-normalized name.
+	 */
+	private boolean ownsNormalizedCard(String normalizedCard)
+	{
+		return ownedNormalized.contains(normalizedCard)
+			|| extraAllowNormalized.contains(normalizedCard)
+			|| unlockedByParty(normalizedCard);
+	}
+
+	/**
+	 * @return the interaction requirement this menu action fails, or null when it is allowed. The
+	 * kind is derived from the action so one lookup covers objects, NPCs, fishing spots, item-on-object
+	 * and interface flows.
+	 */
+	private String missingForInteraction(MenuAction action, String target, String option)
+	{
+		if (!effGateActivities() || !collectionReader.hasCollection() || target == null || target.isEmpty())
+		{
+			return null;
+		}
+		for (String kind : kindsFor(action))
+		{
+			String missing = interactionGate.firstMissing(kind, target, option, this::ownsNormalizedCard);
+			if (missing != null)
+			{
+				return missing;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Menu actions map to more than one catalog kind: an NPC action can be a plain NPC or a fishing
+	 * spot, and a widget click can be an interface or an inventory entry. Trying both is cheaper
+	 * than tracking which is which, and a miss just returns no rule.
+	 */
+	private static List<String> kindsFor(MenuAction action)
+	{
+		switch (action)
+		{
+			case GAME_OBJECT_FIRST_OPTION:
+			case GAME_OBJECT_SECOND_OPTION:
+			case GAME_OBJECT_THIRD_OPTION:
+			case GAME_OBJECT_FOURTH_OPTION:
+			case GAME_OBJECT_FIFTH_OPTION:
+				return List.of(TcgInteractionCatalog.KIND_OBJECT);
+			case ITEM_USE_ON_GAME_OBJECT:
+			case WIDGET_TARGET_ON_GAME_OBJECT:
+				return List.of(TcgInteractionCatalog.KIND_ITEM_ON_OBJECT, TcgInteractionCatalog.KIND_OBJECT);
+			case NPC_FIRST_OPTION:
+			case NPC_SECOND_OPTION:
+			case NPC_THIRD_OPTION:
+			case NPC_FOURTH_OPTION:
+			case NPC_FIFTH_OPTION:
+			case ITEM_USE_ON_NPC:
+			case WIDGET_TARGET_ON_NPC:
+				return List.of(TcgInteractionCatalog.KIND_NPC, TcgInteractionCatalog.KIND_FISHING_SPOT);
+			case CC_OP:
+			case CC_OP_LOW_PRIORITY:
+			case WIDGET_FIRST_OPTION:
+			case WIDGET_SECOND_OPTION:
+			case WIDGET_THIRD_OPTION:
+			case WIDGET_FOURTH_OPTION:
+			case WIDGET_FIFTH_OPTION:
+				return List.of(TcgInteractionCatalog.KIND_INTERFACE, TcgInteractionCatalog.KIND_INVENTORY);
+			case ITEM_FIRST_OPTION:
+			case ITEM_SECOND_OPTION:
+			case ITEM_THIRD_OPTION:
+			case ITEM_FOURTH_OPTION:
+			case ITEM_FIFTH_OPTION:
+			case ITEM_USE:
+			case ITEM_USE_ON_ITEM:
+				return List.of(TcgInteractionCatalog.KIND_INVENTORY);
+			default:
+				return List.of();
 		}
 	}
 
@@ -2043,7 +2180,7 @@ public class TcgLockedPlugin extends Plugin
 
 	private void warn(String message)
 	{
-		if (config.warnInChat() && !enforcementDeferred() && client.getGameState() == GameState.LOGGED_IN)
+		if (config.warnInChat() && !enforcementSuspended() && client.getGameState() == GameState.LOGGED_IN)
 		{
 			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "[TCG Locked] " + message, null);
 		}

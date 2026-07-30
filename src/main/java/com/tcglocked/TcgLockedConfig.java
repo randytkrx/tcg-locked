@@ -167,6 +167,20 @@ public interface TcgLockedConfig extends Config
 		return false;
 	}
 
+	@ConfigItem(
+		keyName = "gateActivities",
+		name = "Lock activities",
+		description = "Require owning the relevant cards before you can do an activity: chopping a tree, mining a "
+			+ "rock, catching a fish, cooking, pickpocketing and so on. Activities with no cards listed are always "
+			+ "free. Used when Difficulty is Custom.",
+		section = LOCKING,
+		position = 7
+	)
+	default boolean gateActivities()
+	{
+		return false;
+	}
+
 	// Hidden while the reveal is disabled, so nobody toggles a setting that does nothing. The stored
 	// value is left untouched and takes effect again if the reveal comes back.
 	@ConfigItem(
