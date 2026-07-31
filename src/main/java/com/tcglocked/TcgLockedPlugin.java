@@ -174,6 +174,9 @@ public class TcgLockedPlugin extends Plugin
 	private TcgLockedPanel panel;
 
 	@Inject
+	private TcgSharedCatalogManager sharedCatalogManager;
+
+	@Inject
 	private TcgInteractionGate interactionGate;
 
 	@Inject
@@ -272,6 +275,9 @@ public class TcgLockedPlugin extends Plugin
 	private int cachedLockbookUnlocked;
 	private int cachedLockbookPooled;
 	private Map<String, Integer> cachedContributions = Collections.emptyMap();
+	private volatile boolean sharedCatalogDirty = true;
+	private TcgSharedCatalogSnapshot sharedCatalogSnapshot =
+		new TcgSharedCatalogSnapshot(Collections.emptyMap());
 	@Provides
 	TcgLockedConfig provideConfig(ConfigManager configManager)
 	{
@@ -283,8 +289,11 @@ public class TcgLockedPlugin extends Plugin
 	{
 		started = true;
 		lifecycleGeneration++;
+		sharedCatalogDirty = true;
 		panel.setRefreshAction(this::manualRefresh);
 		panel.setConsentAction(this::setPoolConsent);
+		panel.setSharedCatalogAction(this::openSharedCatalog);
+		sharedCatalogManager.start();
 		navButton = NavigationButton.builder()
 			.tooltip("TCG Locked")
 			.icon(TcgLockedPanel.crestIcon(24))
@@ -359,8 +368,10 @@ public class TcgLockedPlugin extends Plugin
 	{
 		started = false;
 		lifecycleGeneration++;
+		panel.setSharedCatalogAction(null);
 		panel.setRefreshAction(null);
 		panel.setConsentAction(null);
+		sharedCatalogManager.dispose();
 		try
 		{
 			withdrawFromApprovedMembers();
@@ -412,6 +423,8 @@ public class TcgLockedPlugin extends Plugin
 		cachedLockItems = Collections.emptyList();
 		cachedContributions = Collections.emptyMap();
 		lockbookDirty = true;
+		sharedCatalogDirty = true;
+		sharedCatalogSnapshot = new TcgSharedCatalogSnapshot(Collections.emptyMap());
 		seenProfileKey = null;
 		baselineEstablished = false;
 		sessionUnlocks = 0;
@@ -476,6 +489,7 @@ public class TcgLockedPlugin extends Plugin
 				{
 					withdrawFromApprovedMembers();
 				}
+				markSharedCatalogDirty();
 			}
 			rebuildExtraAllow();
 			lockbookDirty = true;
@@ -572,6 +586,7 @@ public class TcgLockedPlugin extends Plugin
 		partyProgress.clear();
 		lastBroadcast = null;
 		lockbookDirty = true;
+		markSharedCatalogDirty();
 		baselineEstablished = false;
 		queryTcgApi();
 		apiQueryTicks = collectionReader.hasCollection() ? -1 : 0;
@@ -629,6 +644,7 @@ public class TcgLockedPlugin extends Plugin
 				lockbookDirty = true;
 				if (!sent.equals(previous))
 				{
+					markSharedCatalogDirty();
 				}
 			}
 		}
@@ -1059,6 +1075,44 @@ public class TcgLockedPlugin extends Plugin
 		{
 			forceQueryTcgApi();
 			refreshOwned();
+		});
+	}
+
+	private void openSharedCatalog()
+	{
+		invokeLaterIfStarted(() -> sharedCatalogManager.show(sharedCatalogSnapshot()));
+	}
+
+	private TcgSharedCatalogSnapshot sharedCatalogSnapshot()
+	{
+		if (!sharedCatalogDirty)
+		{
+			return sharedCatalogSnapshot;
+		}
+		Map<String, Set<String>> owners = new HashMap<>();
+		if (config.partyShare())
+		{
+			for (String approved : poolConsent.approvedKeys())
+			{
+				owners.put(approved, Collections.emptySet());
+			}
+			for (Map.Entry<String, Set<String>> entry : pooledKeys.entrySet())
+			{
+				owners.put(entry.getKey(), entry.getValue() == null
+					? Collections.emptySet() : new HashSet<>(entry.getValue()));
+			}
+		}
+		sharedCatalogSnapshot = new TcgSharedCatalogSnapshot(owners);
+		sharedCatalogDirty = false;
+		return sharedCatalogSnapshot;
+	}
+
+	private void markSharedCatalogDirty()
+	{
+		invokeLaterIfStarted(() ->
+		{
+			sharedCatalogDirty = true;
+			sharedCatalogManager.refreshIfVisible(sharedCatalogSnapshot());
 		});
 	}
 
@@ -2036,6 +2090,7 @@ public class TcgLockedPlugin extends Plugin
 				sendWithdraw(key);
 			}
 			lockbookDirty = true;
+			markSharedCatalogDirty();
 			// Our own keys only go out once everyone present is approved, so a decision changes what
 			// we broadcast as well as what we apply.
 			broadcastProgress(true);
@@ -2150,6 +2205,7 @@ public class TcgLockedPlugin extends Plugin
 		if (had)
 		{
 			lockbookDirty = true;
+			markSharedCatalogDirty();
 			chat(displayNameFor(from, senderKey) + " stopped sharing their cards with you.");
 			refreshOwned();
 		}
@@ -2163,6 +2219,7 @@ public class TcgLockedPlugin extends Plugin
 		if (had)
 		{
 			lockbookDirty = true;
+			markSharedCatalogDirty();
 		}
 	}
 
@@ -2220,6 +2277,7 @@ public class TcgLockedPlugin extends Plugin
 				forgetPooledPartner(partnerKey);
 			}
 		}
+		markSharedCatalogDirty();
 	}
 
 	private List<String> readPooledPartnerNames()
