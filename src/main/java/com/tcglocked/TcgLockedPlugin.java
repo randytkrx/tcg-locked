@@ -246,6 +246,8 @@ public class TcgLockedPlugin extends Plugin
 	/** Last progress values we broadcast, to avoid spamming the party with unchanged updates. */
 	private int[] lastBroadcast;
 	private Set<String> lastBroadcastOwned = Collections.emptySet();
+	private Set<String> lastBroadcastAudience = Collections.emptySet();
+	private int partyIdentityRefreshTicks;
 
 	/** Pooled cards last offered to Bronzeman TCG; null re-sends even if the set is unchanged. */
 	private Set<String> lastSharedWithBronzeman = Collections.emptySet();
@@ -398,6 +400,8 @@ public class TcgLockedPlugin extends Plugin
 		poolConsent.invalidate();
 		lastBroadcast = null;
 		lastBroadcastOwned = Collections.emptySet();
+		lastBroadcastAudience = Collections.emptySet();
+		partyIdentityRefreshTicks = 0;
 		// Withdraw the pooled cards from Bronzeman TCG: with this plugin off, the group's unlocks
 		// should stop applying there too rather than linger for the rest of the session.
 		shareUnlocksWithBronzeman();
@@ -484,6 +488,7 @@ public class TcgLockedPlugin extends Plugin
 				{
 					lastBroadcast = null;
 					lastBroadcastOwned = Collections.emptySet();
+					lastBroadcastAudience = Collections.emptySet();
 				}
 				else
 				{
@@ -511,6 +516,13 @@ public class TcgLockedPlugin extends Plugin
 		if (unlockQuietTicks >= 0 && --unlockQuietTicks < 0)
 		{
 			showPendingUnlocks();
+		}
+		// Party names arrive after UserJoin. Rechecking the audience makes a newly resolved,
+		// already-approved member receive a complete snapshot without another consent click.
+		if (config.partyShare() && partyService.isInParty() && ++partyIdentityRefreshTicks >= 5)
+		{
+			partyIdentityRefreshTicks = 0;
+			broadcastProgress(false);
 		}
 	}
 
@@ -585,6 +597,7 @@ public class TcgLockedPlugin extends Plugin
 		warnedViolationItemIds.clear();
 		partyProgress.clear();
 		lastBroadcast = null;
+		lastBroadcastAudience = Collections.emptySet();
 		lockbookDirty = true;
 		markSharedCatalogDirty();
 		baselineEstablished = false;
@@ -618,6 +631,11 @@ public class TcgLockedPlugin extends Plugin
 		if (packed != null && packed.length() <= MAX_PARTY_PACKED_LENGTH)
 		{
 			sent = cardCatalog.unpackKeysOrNull(packed);
+			if (sent == null && message.getOwnedKeys() != null)
+			{
+				// Retain interoperability when a mixed-version party cannot decode the bitmap.
+				sent = cardCatalog.filterKnownKeys(message.getOwnedKeys());
+			}
 		}
 		else if (packed == null && message.getOwnedKeys() != null)
 		{
@@ -627,31 +645,16 @@ public class TcgLockedPlugin extends Plugin
 		PartyMember from = partyService.getMemberById(message.getMemberId());
 		String partnerKey = from == null ? "" : rememberMemberKey(from);
 		boolean addressed = addressedToUs(message.getSharedWith());
-		if (!partnerKey.isEmpty() && !addressed && message.getSharedWith() != null)
+		TcgPartyProgressPolicy.Result update = TcgPartyProgressPolicy.apply(
+			offeredKeys, pooledKeys, partnerKey, addressed, sent, poolConsent.isApproved(partnerKey));
+		if (update.isPooled())
 		{
-			removePooledCollection(partnerKey);
-		}
-		else if (sent != null && !partnerKey.isEmpty() && addressed)
-		{
-			// Keys reach the whole party — there is no per-recipient send — so two things gate them:
-			// the sender addressing us, and our own consent. Both must agree, which is what keeps
-			// sharing mutual rather than something either side can impose.
-			offeredKeys.put(partnerKey, sent);
-			if (poolConsent.isApproved(partnerKey))
+			savePooledPartner(partnerKey, sent);
+			lockbookDirty = true;
+			if (!sent.equals(update.getPrevious()))
 			{
-				Set<String> previous = pooledKeys.put(partnerKey, sent);
-				savePooledPartner(partnerKey, sent);
-				lockbookDirty = true;
-				if (!sent.equals(previous))
-				{
-					markSharedCatalogDirty();
-				}
+				markSharedCatalogDirty();
 			}
-		}
-		else if (packed != null && !partnerKey.isEmpty() && addressed)
-		{
-			// A malformed or differently-versioned bitmap must not leave an older collection active.
-			removePooledCollection(partnerKey);
 		}
 		if (firstContact)
 		{
@@ -773,9 +776,11 @@ public class TcgLockedPlugin extends Plugin
 		rebuildLockbookIfNeeded();
 		int[] current = new int[]{ownedLower.size(), cachedLockbookUnlocked, seenItemIds.size()};
 		boolean collectionChanged = !ownedNormalized.equals(lastBroadcastOwned);
+		Set<String> audience = approvedMembersPresent();
+		boolean audienceChanged = !audience.equals(lastBroadcastAudience);
 		if (!force && lastBroadcast != null
 			&& lastBroadcast[0] == current[0] && lastBroadcast[1] == current[1] && lastBroadcast[2] == current[2]
-			&& !collectionChanged)
+			&& !collectionChanged && !audienceChanged)
 		{
 			return;
 		}
@@ -788,15 +793,15 @@ public class TcgLockedPlugin extends Plugin
 		// as anyone here is approved, addressed to exactly those people: a party message cannot skip
 		// a recipient, so the payload names who it is for and everyone else ignores it. That lets you
 		// share with the people you have synced without waiting on someone who is still undecided.
-		Set<String> audience = approvedMembersPresent();
 		message.setSharedWith(audience);
-		if (!audience.isEmpty() && (force || collectionChanged))
+		if (!audience.isEmpty() && (force || collectionChanged || audienceChanged))
 		{
 			message.setPackedOwnedKeys(cardCatalog.packKeys(ownedNormalized));
 			// Keep interoperability with the currently released pre-bitmap client during rollout.
 			message.setOwnedKeys(ownedNormalized);
-			lastBroadcastOwned = Collections.unmodifiableSet(new HashSet<>(ownedNormalized));
 		}
+		lastBroadcastOwned = Collections.unmodifiableSet(new HashSet<>(ownedNormalized));
+		lastBroadcastAudience = Collections.unmodifiableSet(new HashSet<>(audience));
 		partyService.send(message);
 	}
 
@@ -2004,9 +2009,9 @@ public class TcgLockedPlugin extends Plugin
 		List<String> blocking = new ArrayList<>();
 		for (PartyMember member : members)
 		{
-			if (member.getMemberId() != localId && !poolConsent.isApproved(member.getDisplayName()))
+			String key = rememberMemberKey(member);
+			if (member.getMemberId() != localId && !poolConsent.isApproved(key))
 			{
-				String key = rememberMemberKey(member);
 				blocking.add(displayNameFor(member, key));
 			}
 		}
@@ -2046,13 +2051,10 @@ public class TcgLockedPlugin extends Plugin
 		Set<String> audience = new HashSet<>();
 		for (PartyMember member : members)
 		{
-			if (member.getMemberId() != localId && poolConsent.isApproved(member.getDisplayName()))
+			String key = rememberMemberKey(member);
+			if (member.getMemberId() != localId && !key.isEmpty() && poolConsent.isApproved(key))
 			{
-				String key = rememberMemberKey(member);
-				if (!key.isEmpty())
-				{
-					audience.add(key);
-				}
+				audience.add(key);
 			}
 		}
 		return audience;
@@ -2143,13 +2145,10 @@ public class TcgLockedPlugin extends Plugin
 		}
 		for (PartyMember member : members)
 		{
-			if (member.getMemberId() != localId && poolConsent.isApproved(member.getDisplayName()))
+			String key = rememberMemberKey(member);
+			if (member.getMemberId() != localId && !key.isEmpty() && poolConsent.isApproved(key))
 			{
-				String key = rememberMemberKey(member);
-				if (!key.isEmpty())
-				{
-					sendWithdraw(key);
-				}
+				sendWithdraw(key);
 			}
 		}
 	}
@@ -2208,18 +2207,6 @@ public class TcgLockedPlugin extends Plugin
 			markSharedCatalogDirty();
 			chat(displayNameFor(from, senderKey) + " stopped sharing their cards with you.");
 			refreshOwned();
-		}
-	}
-
-	private void removePooledCollection(String partnerKey)
-	{
-		boolean had = pooledKeys.remove(partnerKey) != null;
-		offeredKeys.remove(partnerKey);
-		forgetPooledPartner(partnerKey);
-		if (had)
-		{
-			lockbookDirty = true;
-			markSharedCatalogDirty();
 		}
 	}
 
