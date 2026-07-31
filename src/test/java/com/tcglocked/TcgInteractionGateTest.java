@@ -115,4 +115,22 @@ public class TcgInteractionGateTest
 		assertNull(gateOf(BREAD_ON_RANGE)
 			.firstMissing("item-on-object", "Bread dough", "Fire", owning()));
 	}
+
+	@Test
+	public void contextOnlyRolesDoNotCreateUnknowableRequirements()
+	{
+		String trap = "{\"nodes\":[{\"kind\":\"inventory\",\"name\":\"Bird snare\","
+			+ "\"options\":[\"lay\"],\"requiredCardGroups\":[[\"Bird snare\"],[\"Crimson swift\"]],"
+			+ "\"groupRoles\":[\"\",\"creature\"]}]}";
+		assertNull(gateOf(trap).firstMissing("inventory", "Bird snare", "Lay", owning("bird snare")));
+	}
+
+	@Test
+	public void slayerAssignmentListsDoNotBlockTheMaster()
+	{
+		String slayer = "{\"nodes\":[{\"kind\":\"npc\",\"name\":\"Steve\","
+			+ "\"options\":[\"talk-to\"],\"requiredCardGroups\":[[\"Steve\"],[\"Abyssal demon\"]],"
+			+ "\"groupRoles\":[\"master\",\"monsters\"]}]}";
+		assertNull(gateOf(slayer).firstMissing("npc", "Steve", "Talk-to", owning("steve")));
+	}
 }

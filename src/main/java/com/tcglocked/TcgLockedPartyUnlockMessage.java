@@ -16,6 +16,7 @@
  */
 package com.tcglocked;
 
+import java.util.Set;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import net.runelite.client.party.messages.PartyMemberMessage;
@@ -26,4 +27,6 @@ import net.runelite.client.party.messages.PartyMemberMessage;
 public class TcgLockedPartyUnlockMessage extends PartyMemberMessage
 {
 	private String itemName;
+	/** RuneScape names this announcement is intended for; party messages reach every member. */
+	private Set<String> sharedWith;
 }

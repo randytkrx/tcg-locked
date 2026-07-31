@@ -96,6 +96,11 @@ class TcgInteractionCatalog
 	 */
 	Rule find(String kind, String name, String option)
 	{
+		return find(kind, name, option, -1);
+	}
+
+	Rule find(String kind, String name, String option, int targetId)
+	{
 		if (kind == null || name == null)
 		{
 			return null;
@@ -106,14 +111,68 @@ class TcgInteractionCatalog
 			return null;
 		}
 		String wanted = option == null ? "" : option.toLowerCase(Locale.ROOT).trim();
+		List<Rule> exactOptions = new ArrayList<>();
+		List<Rule> wildcardOptions = new ArrayList<>();
 		for (Rule rule : candidates)
 		{
-			if (rule.matchesOption(wanted))
+			if (rule.matchesExactOption(wanted))
 			{
-				return rule;
+				exactOptions.add(rule);
+			}
+			else if (rule.matchesAnyOption())
+			{
+				wildcardOptions.add(rule);
 			}
 		}
-		return null;
+		return selectRule(exactOptions.isEmpty() ? wildcardOptions : exactOptions, targetId);
+	}
+
+	private static Rule selectRule(List<Rule> matches, int targetId)
+	{
+		if (matches.isEmpty())
+		{
+			return null;
+		}
+		if (targetId > 0)
+		{
+			Rule identified = null;
+			boolean hasQualifiedRule = false;
+			for (Rule rule : matches)
+			{
+				hasQualifiedRule |= !rule.targetIds.isEmpty();
+				if (rule.targetIds.contains(targetId))
+				{
+					if (identified != null)
+					{
+						return null;
+					}
+					identified = rule;
+				}
+			}
+			if (identified != null)
+			{
+				return identified;
+			}
+			if (hasQualifiedRule)
+			{
+				return null;
+			}
+		}
+
+		Rule unqualified = null;
+		for (Rule rule : matches)
+		{
+			if (rule.targetIds.isEmpty())
+			{
+				if (unqualified != null)
+				{
+					// Conflicting rules without a discriminator are unsafe; do not guess by file order.
+					return null;
+				}
+				unqualified = rule;
+			}
+		}
+		return unqualified;
 	}
 
 	/** @return how many distinct kind/name targets are gated. Used by tests and debug logging. */
@@ -176,7 +235,7 @@ class TcgInteractionCatalog
 				continue;
 			}
 			built.computeIfAbsent(key(node.kind, name), k -> new ArrayList<>())
-				.add(new Rule(node.category, toOptions(node.options), groups));
+				.add(new Rule(node.category, toOptions(node.options), toIds(node.objectIds), groups));
 		}
 		built.replaceAll((k, v) -> Collections.unmodifiableList(v));
 		return Collections.unmodifiableMap(built);
@@ -276,6 +335,23 @@ class TcgInteractionCatalog
 		return lower.isEmpty() ? Collections.singleton(ANY_OPTION) : Collections.unmodifiableSet(lower);
 	}
 
+	private static Set<Integer> toIds(List<Integer> ids)
+	{
+		if (ids == null || ids.isEmpty())
+		{
+			return Collections.emptySet();
+		}
+		Set<Integer> valid = new HashSet<>();
+		for (Integer id : ids)
+		{
+			if (id != null && id > 0)
+			{
+				valid.add(id);
+			}
+		}
+		return Collections.unmodifiableSet(valid);
+	}
+
 	private static String key(String kind, String normalizedName)
 	{
 		return kind.toLowerCase(Locale.ROOT).trim() + '|' + normalizedName;
@@ -286,18 +362,25 @@ class TcgInteractionCatalog
 	{
 		final String category;
 		private final Set<String> options;
+		private final Set<Integer> targetIds;
 		final List<CardGroup> groups;
 
-		Rule(String category, Set<String> options, List<CardGroup> groups)
+		Rule(String category, Set<String> options, Set<Integer> targetIds, List<CardGroup> groups)
 		{
 			this.category = category;
 			this.options = options;
+			this.targetIds = targetIds;
 			this.groups = Collections.unmodifiableList(groups);
 		}
 
-		boolean matchesOption(String lowerOption)
+		boolean matchesExactOption(String lowerOption)
 		{
-			return options.contains(ANY_OPTION) || options.contains(lowerOption);
+			return options.contains(lowerOption);
+		}
+
+		boolean matchesAnyOption()
+		{
+			return options.contains(ANY_OPTION);
 		}
 	}
 
@@ -357,6 +440,7 @@ class TcgInteractionCatalog
 		List<List<String>> requiredCardGroups;
 		List<String> groupRoles;
 		List<String> groupLabels;
+		List<Integer> objectIds;
 		boolean requireAll;
 	}
 }

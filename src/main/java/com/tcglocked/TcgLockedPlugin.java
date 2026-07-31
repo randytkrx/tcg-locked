@@ -174,9 +174,6 @@ public class TcgLockedPlugin extends Plugin
 	private TcgLockedPanel panel;
 
 	@Inject
-	private TcgSharedCatalogManager sharedCatalogManager;
-
-	@Inject
 	private TcgInteractionGate interactionGate;
 
 	@Inject
@@ -251,7 +248,8 @@ public class TcgLockedPlugin extends Plugin
 	private Set<String> lastSharedWithBronzeman = Collections.emptySet();
 
 	/** Unlocks detected but not yet shown, held while the collection is still changing. */
-	private final List<String> pendingUnlocks = new ArrayList<>();
+	/** Lower-case card names waiting for the pack quiet period; a set prevents duplicate announcements. */
+	private final Set<String> pendingUnlocks = new HashSet<>();
 	/** Quiet ticks left before {@link #pendingUnlocks} is shown; -1 when nothing is waiting. */
 	private int unlockQuietTicks = -1;
 
@@ -274,10 +272,6 @@ public class TcgLockedPlugin extends Plugin
 	private int cachedLockbookUnlocked;
 	private int cachedLockbookPooled;
 	private Map<String, Integer> cachedContributions = Collections.emptyMap();
-	private boolean sharedCatalogDirty = true;
-	private TcgSharedCatalogSnapshot sharedCatalogSnapshot =
-		new TcgSharedCatalogSnapshot(Collections.emptyMap());
-
 	@Provides
 	TcgLockedConfig provideConfig(ConfigManager configManager)
 	{
@@ -289,11 +283,8 @@ public class TcgLockedPlugin extends Plugin
 	{
 		started = true;
 		lifecycleGeneration++;
-		sharedCatalogDirty = true;
 		panel.setRefreshAction(this::manualRefresh);
 		panel.setConsentAction(this::setPoolConsent);
-		panel.setSharedCatalogAction(this::openSharedCatalog);
-		sharedCatalogManager.start();
 		navButton = NavigationButton.builder()
 			.tooltip("TCG Locked")
 			.icon(TcgLockedPanel.crestIcon(24))
@@ -368,9 +359,16 @@ public class TcgLockedPlugin extends Plugin
 	{
 		started = false;
 		lifecycleGeneration++;
-		panel.setSharedCatalogAction(null);
-		sharedCatalogManager.dispose();
-		withdrawFromApprovedMembers();
+		panel.setRefreshAction(null);
+		panel.setConsentAction(null);
+		try
+		{
+			withdrawFromApprovedMembers();
+		}
+		catch (RuntimeException ex)
+		{
+			log.debug("TCG Locked: unable to withdraw party cards during shutdown", ex);
+		}
 		if (navButton != null)
 		{
 			clientToolbar.removeNavigation(navButton);
@@ -414,11 +412,17 @@ public class TcgLockedPlugin extends Plugin
 		cachedLockItems = Collections.emptyList();
 		cachedContributions = Collections.emptyMap();
 		lockbookDirty = true;
-		sharedCatalogDirty = true;
-		sharedCatalogSnapshot = new TcgSharedCatalogSnapshot(Collections.emptyMap());
 		seenProfileKey = null;
 		baselineEstablished = false;
 		sessionUnlocks = 0;
+		final int stoppedGeneration = lifecycleGeneration;
+		SwingUtilities.invokeLater(() ->
+		{
+			if (!started && lifecycleGeneration == stoppedGeneration)
+			{
+				panel.reset();
+			}
+		});
 	}
 
 	@Subscribe
@@ -472,7 +476,6 @@ public class TcgLockedPlugin extends Plugin
 				{
 					withdrawFromApprovedMembers();
 				}
-				markSharedCatalogDirty();
 			}
 			rebuildExtraAllow();
 			lockbookDirty = true;
@@ -528,7 +531,11 @@ public class TcgLockedPlugin extends Plugin
 			return;
 		}
 		boolean firstPayload = !collectionReader.hasCollection();
-		collectionReader.onApiOwnedNames((List<?>) names);
+		if (!collectionReader.onApiOwnedNames((List<?>) names))
+		{
+			log.debug("TCG Locked: ignored malformed owned-names payload.");
+			return;
+		}
 		if (firstPayload && collectionReader.hasCollection())
 		{
 			log.debug("TCG Locked: osrs-tcg PluginMessage API active; collection now push-updated.");
@@ -565,7 +572,6 @@ public class TcgLockedPlugin extends Plugin
 		partyProgress.clear();
 		lastBroadcast = null;
 		lockbookDirty = true;
-		markSharedCatalogDirty();
 		baselineEstablished = false;
 		queryTcgApi();
 		apiQueryTicks = collectionReader.hasCollection() ? -1 : 0;
@@ -623,7 +629,6 @@ public class TcgLockedPlugin extends Plugin
 				lockbookDirty = true;
 				if (!sent.equals(previous))
 				{
-					markSharedCatalogDirty();
 				}
 			}
 		}
@@ -661,6 +666,12 @@ public class TcgLockedPlugin extends Plugin
 			return;
 		}
 		PartyMember from = partyService.getMemberById(message.getMemberId());
+		String senderKey = from == null ? "" : rememberMemberKey(from);
+		if (senderKey.isEmpty() || !poolConsent.isApproved(senderKey)
+			|| !addressedToUs(message.getSharedWith()))
+		{
+			return;
+		}
 		String who = from != null && from.getDisplayName() != null && !from.getDisplayName().trim().isEmpty()
 			? from.getDisplayName().trim()
 			: "A party member";
@@ -779,8 +790,14 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return;
 		}
+		Set<String> audience = approvedMembersPresent();
+		if (audience.isEmpty())
+		{
+			return;
+		}
 		TcgLockedPartyUnlockMessage message = new TcgLockedPartyUnlockMessage();
 		message.setItemName(itemName);
+		message.setSharedWith(audience);
 		partyService.send(message);
 	}
 
@@ -810,7 +827,7 @@ public class TcgLockedPlugin extends Plugin
 		if (!"examine".equals(verb))
 		{
 			MenuEntry entry = event.getMenuEntry();
-			if (missingForInteraction(entry.getType(), entry.getParam1(), event.getTarget(), verb,
+			if (missingForInteraction(entry.getType(), entry.getIdentifier(), entry.getParam1(), event.getTarget(), verb,
 				entry.getNpc()) != null)
 			{
 				removeMenuEntry(entry);
@@ -818,8 +835,10 @@ public class TcgLockedPlugin extends Plugin
 			}
 		}
 
-		// Item interaction: block gated verbs on locked items.
-		if (!isGatedVerb(verb))
+		// Selecting a locked inventory item for generic Use is itself a gated item action.
+		MenuEntry entry = event.getMenuEntry();
+		boolean genericUse = isInventoryItemUse(entry.getType(), entry.getParam1(), verb);
+		if (!genericUse && !isGatedVerb(verb))
 		{
 			return;
 		}
@@ -882,7 +901,7 @@ public class TcgLockedPlugin extends Plugin
 		// Activity backstop, for one-click and keybound paths that never raise a menu entry.
 		if (!"examine".equals(verb))
 		{
-			String missing = missingForInteraction(event.getMenuAction(), event.getParam1(),
+			String missing = missingForInteraction(event.getMenuAction(), event.getMenuEntry().getIdentifier(), event.getParam1(),
 				event.getMenuTarget(), verb, event.getMenuEntry().getNpc());
 			if (missing != null)
 			{
@@ -895,7 +914,8 @@ public class TcgLockedPlugin extends Plugin
 			}
 		}
 
-		if (!isGatedVerb(verb))
+		boolean genericUse = isInventoryItemUse(event.getMenuAction(), event.getParam1(), verb);
+		if (!genericUse && !isGatedVerb(verb))
 		{
 			return;
 		}
@@ -1033,45 +1053,13 @@ public class TcgLockedPlugin extends Plugin
 
 	private void manualRefresh()
 	{
-		// Re-ask unconditionally: the reply lands inline and the refresh below then reads it, so the
-		// button recovers a stale collection instead of just repainting the same numbers.
-		forceQueryTcgApi();
-		scheduleRefresh();
-	}
-
-	private void openSharedCatalog()
-	{
-		invokeLaterIfStarted(() -> sharedCatalogManager.show(sharedCatalogSnapshot()));
-	}
-
-	private TcgSharedCatalogSnapshot sharedCatalogSnapshot()
-	{
-		if (!sharedCatalogDirty)
+		// The button runs on Swing's EDT. EventBus.post is synchronous, so move the query and its
+		// possible inline response to the client thread before touching another plugin.
+		invokeLaterIfStarted(() ->
 		{
-			return sharedCatalogSnapshot;
-		}
-		Map<String, Set<String>> owners = new HashMap<>();
-		if (config.partyShare())
-		{
-			for (String approved : poolConsent.approvedKeys())
-			{
-				owners.put(approved, Collections.emptySet());
-			}
-			for (Map.Entry<String, Set<String>> entry : pooledKeys.entrySet())
-			{
-				owners.put(entry.getKey(), entry.getValue() == null
-					? Collections.emptySet() : new HashSet<>(entry.getValue()));
-			}
-		}
-		sharedCatalogSnapshot = new TcgSharedCatalogSnapshot(owners);
-		sharedCatalogDirty = false;
-		return sharedCatalogSnapshot;
-	}
-
-	private void markSharedCatalogDirty()
-	{
-		sharedCatalogDirty = true;
-		sharedCatalogManager.refreshIfVisible(sharedCatalogSnapshot());
+			forceQueryTcgApi();
+			refreshOwned();
+		});
 	}
 
 	/** Runs on the client thread (scheduled via {@link #scheduleRefresh()}), so unlock-diff state has no races. */
@@ -1089,11 +1077,9 @@ public class TcgLockedPlugin extends Plugin
 			loadPooledPartners();
 		}
 
-		// Read the "is it known" flag BEFORE the set: if a payload lands between the two reads this
-		// pass is treated as still-unknown and the next one baselines silently, which is the safe
-		// direction. (Set-then-flag could announce an entire collection as unlocks.)
-		final boolean collectionKnown = collectionReader.hasCollection();
-		Set<String> owned = collectionReader.readOwnedCardNamesLower();
+		Set<String> snapshot = collectionReader.snapshotOrNull();
+		final boolean collectionKnown = snapshot != null;
+		Set<String> owned = collectionKnown ? snapshot : Collections.emptySet();
 		Set<String> normalized = new HashSet<>();
 		for (String name : owned)
 		{
@@ -1113,29 +1099,22 @@ public class TcgLockedPlugin extends Plugin
 			// open until we have real data.
 			baselineEstablished = false;
 			previousOwned.clear();
+			pendingUnlocks.clear();
+			unlockQuietTicks = -1;
 		}
 		else if (baselineEstablished)
 		{
-			List<String> newlyUnlocked = new ArrayList<>();
-			for (String name : owned)
+			if (reconcilePendingUnlocks(pendingUnlocks, previousOwned, owned))
 			{
-				if (!previousOwned.contains(name))
-				{
-					newlyUnlocked.add(name);
-				}
-			}
-			if (!newlyUnlocked.isEmpty())
-			{
-				Collections.sort(newlyUnlocked);
-				for (String name : newlyUnlocked)
-				{
-					pendingUnlocks.add(displayName(name));
-				}
 				// Cards land in the collection as a pack is opened, one per flip. Showing each one
 				// as it arrives names the card before the player has turned it over, which gives
 				// away their own pack. Holding until the collection goes quiet reveals the lot
 				// together, after the pack is done.
 				unlockQuietTicks = config.waitForPackOpenings() ? UNLOCK_QUIET_TICKS : 0;
+			}
+			else if (pendingUnlocks.isEmpty())
+			{
+				unlockQuietTicks = -1;
 			}
 			previousOwned.clear();
 			previousOwned.addAll(owned);
@@ -1157,6 +1136,21 @@ public class TcgLockedPlugin extends Plugin
 		publishStatus();
 	}
 
+	/** Reconciles the quiet-period queue and reports whether this snapshot added a new card. */
+	static boolean reconcilePendingUnlocks(Set<String> pending, Set<String> previous, Set<String> owned)
+	{
+		pending.retainAll(owned);
+		boolean added = false;
+		for (String name : owned)
+		{
+			if (!previous.contains(name))
+			{
+				added |= pending.add(name);
+			}
+		}
+		return added;
+	}
+
 	/**
 	 * Shows everything held back, once the collection has stopped changing. Runs on the client
 	 * thread from the tick loop, like the rest of the unlock bookkeeping.
@@ -1168,8 +1162,11 @@ public class TcgLockedPlugin extends Plugin
 			return;
 		}
 		long now = System.currentTimeMillis();
-		for (String display : pendingUnlocks)
+		List<String> pending = new ArrayList<>(pendingUnlocks);
+		Collections.sort(pending);
+		for (String name : pending)
 		{
+			String display = displayName(name);
 			recentUnlocks.addFirst(new TcgLockedStatus.Unlock(display, now));
 			sessionUnlocks++;
 			announceUnlock(display);
@@ -1516,6 +1513,12 @@ public class TcgLockedPlugin extends Plugin
 		return effGateConsumables() && CONSUME_VERBS.contains(verb);
 	}
 
+	static boolean isInventoryItemUse(MenuAction action, int widgetId, String verb)
+	{
+		return action == MenuAction.WIDGET_TARGET && "use".equals(verb) && widgetId > 0
+			&& WidgetUtil.componentToInterface(widgetId) == InterfaceID.INVENTORY;
+	}
+
 	// The difficulty preset overrides the individual toggles unless it is Custom.
 
 	private boolean effGateEquipment()
@@ -1601,9 +1604,9 @@ public class TcgLockedPlugin extends Plugin
 	 * kind is derived from the action so one lookup covers objects, NPCs, fishing spots, item-on-object
 	 * and interface flows.
 	 */
-	private String missingForInteraction(MenuAction action, int widgetId, String rawTarget, String option)
+	private String missingForInteraction(MenuAction action, int targetId, int widgetId, String rawTarget, String option)
 	{
-		return missingForInteraction(action, widgetId, rawTarget, option, null);
+		return missingForInteraction(action, targetId, widgetId, rawTarget, option, null);
 	}
 
 	/**
@@ -1611,7 +1614,7 @@ public class TcgLockedPlugin extends Plugin
 	 * "Fishing spot" across every catch, so the catalog keys them by RuneLite's {@link FishingSpot}
 	 * enum name instead, which is only reachable from the NPC id.
 	 */
-	private String missingForInteraction(MenuAction action, int widgetId, String rawTarget, String option,
+	private String missingForInteraction(MenuAction action, int targetId, int widgetId, String rawTarget, String option,
 		NPC npc)
 	{
 		// Ordered cheapest-first on purpose. This runs for every menu entry, every time the menu is
@@ -1668,7 +1671,7 @@ public class TcgLockedPlugin extends Plugin
 				{
 					continue;
 				}
-				missing = interactionGate.firstMissing(kind, usedItem, objectName, this::ownsNormalizedCard);
+				missing = interactionGate.firstMissing(kind, usedItem, objectName, targetId, this::ownsNormalizedCard);
 			}
 			else if (TcgInteractionCatalog.KIND_FISHING_SPOT.equals(kind))
 			{
@@ -1676,7 +1679,7 @@ public class TcgLockedPlugin extends Plugin
 				{
 					continue;
 				}
-				missing = interactionGate.firstMissing(kind, spotName, option, this::ownsNormalizedCard);
+				missing = interactionGate.firstMissing(kind, spotName, option, targetId, this::ownsNormalizedCard);
 			}
 			else
 			{
@@ -1684,7 +1687,7 @@ public class TcgLockedPlugin extends Plugin
 				{
 					continue;
 				}
-				missing = interactionGate.firstMissing(kind, plainName, option, this::ownsNormalizedCard);
+				missing = interactionGate.firstMissing(kind, plainName, option, targetId, this::ownsNormalizedCard);
 			}
 			if (missing != null)
 			{
@@ -1756,6 +1759,8 @@ public class TcgLockedPlugin extends Plugin
 		{
 			case InterfaceID.SKILLMULTI:
 			case InterfaceID.SMITHING:
+			case InterfaceID.SAILING_MENU:
+			case InterfaceID.SAILING_CUSTOMISATION:
 				// Make-X product click: the product name is the only reliable signal.
 				return List.of(TcgInteractionCatalog.KIND_INTERFACE);
 			case InterfaceID.INVENTORY:
@@ -2031,7 +2036,6 @@ public class TcgLockedPlugin extends Plugin
 				sendWithdraw(key);
 			}
 			lockbookDirty = true;
-			markSharedCatalogDirty();
 			// Our own keys only go out once everyone present is approved, so a decision changes what
 			// we broadcast as well as what we apply.
 			broadcastProgress(true);
@@ -2146,8 +2150,7 @@ public class TcgLockedPlugin extends Plugin
 		if (had)
 		{
 			lockbookDirty = true;
-			markSharedCatalogDirty();
-			chat(from.getDisplayName().trim() + " stopped sharing their cards with you.");
+			chat(displayNameFor(from, senderKey) + " stopped sharing their cards with you.");
 			refreshOwned();
 		}
 	}
@@ -2160,7 +2163,6 @@ public class TcgLockedPlugin extends Plugin
 		if (had)
 		{
 			lockbookDirty = true;
-			markSharedCatalogDirty();
 		}
 	}
 
@@ -2218,7 +2220,6 @@ public class TcgLockedPlugin extends Plugin
 				forgetPooledPartner(partnerKey);
 			}
 		}
-		markSharedCatalogDirty();
 	}
 
 	private List<String> readPooledPartnerNames()

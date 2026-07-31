@@ -48,18 +48,46 @@ class TcgInteractionGate
 	 */
 	String firstMissing(String kind, String name, String option, Predicate<String> ownsNormalizedCard)
 	{
-		TcgInteractionCatalog.Rule rule = catalog.find(kind, name, option);
+		return firstMissing(kind, name, option, -1, ownsNormalizedCard);
+	}
+
+	String firstMissing(String kind, String name, String option, int targetId,
+		Predicate<String> ownsNormalizedCard)
+	{
+		TcgInteractionCatalog.Rule rule = catalog.find(kind, name, option, targetId);
 		if (rule == null)
 		{
 			return null;
 		}
 		for (TcgInteractionCatalog.CardGroup group : rule.groups)
 		{
+			if (isContextOnlyRole(group.role))
+			{
+				continue;
+			}
 			if (!group.isSatisfied(ownsNormalizedCard))
 			{
 				return group.describe();
 			}
 		}
 		return null;
+	}
+
+	private static boolean isContextOnlyRole(String role)
+	{
+		if (role == null)
+		{
+			return false;
+		}
+		switch (role.trim().toLowerCase(java.util.Locale.ROOT))
+		{
+			case "creature":
+			case "extra":
+			case "monsters":
+			case "superiors":
+				return true;
+			default:
+				return false;
+		}
 	}
 }

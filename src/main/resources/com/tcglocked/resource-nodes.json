@@ -5320,122 +5320,14 @@
 				],
 				[
 					"Small fishing net"
-				],
-				[
-					"Swamp lizard"
 				]
 			],
 			"groupRoles": [
 				"",
-				"",
-				"creature"
+				""
 			],
 			"requireAll": true,
-			"notes": "Net-trap object is 'Young tree', option 'Set-trap'; each salamander area has its own Young tree - node distinguished by the 'Swamp lizard' add-on. Rope+Net base mode = Rope group AND Small fishing net group. 'Items+Sally' mode adds the salamander's own card group. Object name for the Varlamore Tecu salamander should be re-verified in-game."
-		},
-		{
-			"category": "hunter-salamanders",
-			"kind": "object",
-			"name": "Young tree",
-			"options": [
-				"set-trap"
-			],
-			"requiredCardGroups": [
-				[
-					"Rope"
-				],
-				[
-					"Small fishing net"
-				],
-				[
-					"Orange salamander"
-				]
-			],
-			"groupRoles": [
-				"",
-				"",
-				"creature"
-			],
-			"requireAll": true,
-			"notes": "Net-trap object is 'Young tree', option 'Set-trap'; each salamander area has its own Young tree - node distinguished by the 'Orange salamander' add-on. Rope+Net base mode = Rope group AND Small fishing net group. 'Items+Sally' mode adds the salamander's own card group. Object name for the Varlamore Tecu salamander should be re-verified in-game."
-		},
-		{
-			"category": "hunter-salamanders",
-			"kind": "object",
-			"name": "Young tree",
-			"options": [
-				"set-trap"
-			],
-			"requiredCardGroups": [
-				[
-					"Rope"
-				],
-				[
-					"Small fishing net"
-				],
-				[
-					"Red salamander"
-				]
-			],
-			"groupRoles": [
-				"",
-				"",
-				"creature"
-			],
-			"requireAll": true,
-			"notes": "Net-trap object is 'Young tree', option 'Set-trap'; each salamander area has its own Young tree - node distinguished by the 'Red salamander' add-on. Rope+Net base mode = Rope group AND Small fishing net group. 'Items+Sally' mode adds the salamander's own card group. Object name for the Varlamore Tecu salamander should be re-verified in-game."
-		},
-		{
-			"category": "hunter-salamanders",
-			"kind": "object",
-			"name": "Young tree",
-			"options": [
-				"set-trap"
-			],
-			"requiredCardGroups": [
-				[
-					"Rope"
-				],
-				[
-					"Small fishing net"
-				],
-				[
-					"Black salamander"
-				]
-			],
-			"groupRoles": [
-				"",
-				"",
-				"creature"
-			],
-			"requireAll": true,
-			"notes": "Net-trap object is 'Young tree', option 'Set-trap'; each salamander area has its own Young tree - node distinguished by the 'Black salamander' add-on. Rope+Net base mode = Rope group AND Small fishing net group. 'Items+Sally' mode adds the salamander's own card group. Object name for the Varlamore Tecu salamander should be re-verified in-game."
-		},
-		{
-			"category": "hunter-salamanders",
-			"kind": "object",
-			"name": "Young tree",
-			"options": [
-				"set-trap"
-			],
-			"requiredCardGroups": [
-				[
-					"Rope"
-				],
-				[
-					"Small fishing net"
-				],
-				[
-					"Tecu salamander"
-				]
-			],
-			"groupRoles": [
-				"",
-				"",
-				"creature"
-			],
-			"requireAll": true,
-			"notes": "Net-trap object is 'Young tree', option 'Set-trap'; each salamander area has its own Young tree - node distinguished by the 'Tecu salamander' add-on. Rope+Net base mode = Rope group AND Small fishing net group. 'Items+Sally' mode adds the salamander's own card group. Object name for the Varlamore Tecu salamander should be re-verified in-game."
+			"notes": "The target species cannot be identified from the shared Young tree interaction, so enforce only the common Rope and Small fishing net requirements."
 		},
 		{
 			"category": "mining",
@@ -10919,25 +10811,6 @@
 			"requiredCardGroups": [
 				[
 					"Bread",
-					"Cake"
-				]
-			],
-			"groupRoles": [
-				""
-			],
-			"requireAll": false,
-			"notes": "Baker's / Bakery stall (Ardougne, Keldagrim, Kourend, Varlamore). Any-of: player must own >=1 of these cards to steal. Loot with no card excluded: Chocolate slice."
-		},
-		{
-			"category": "thieving-stalls",
-			"kind": "object",
-			"name": "Baker's Stall",
-			"options": [
-				"steal-from"
-			],
-			"requiredCardGroups": [
-				[
-					"Bread",
 					"Cake",
 					"Chocolate cake"
 				]
@@ -10995,55 +10868,7 @@
 		{
 			"category": "thieving-stalls",
 			"kind": "object",
-			"name": "Cannonball Stall",
-			"options": [
-				"steal-from"
-			],
-			"requiredCardGroups": [
-				[
-					"Bronze cannonball",
-					"Iron cannonball",
-					"Steel cannonball",
-					"Mithril cannonball",
-					"Adamant cannonball",
-					"Rune cannonball",
-					"Dragon cannonball"
-				]
-			],
-			"groupRoles": [
-				""
-			],
-			"requireAll": false,
-			"notes": "Cannonball stall (Port Roberts). Any-of: player must own >=1 of these cards to steal. Loot with no card excluded: none."
-		},
-		{
-			"category": "thieving-stalls",
-			"kind": "object",
 			"name": "Crafting Stall",
-			"options": [
-				"steal-from",
-				"steal from"
-			],
-			"requiredCardGroups": [
-				[
-					"Chisel",
-					"Ring mould",
-					"Necklace mould",
-					"Amulet mould",
-					"Bracelet mould",
-					"Gold bar"
-				]
-			],
-			"groupRoles": [
-				""
-			],
-			"requireAll": false,
-			"notes": "Crafting stall (Ape Atoll, Keldagrim). Any-of: player must own >=1 of these cards to steal. Loot with no card excluded: none."
-		},
-		{
-			"category": "thieving-stalls",
-			"kind": "object",
-			"name": "Crafting stall",
 			"options": [
 				"steal-from",
 				"steal from"
@@ -11178,31 +11003,6 @@
 			"category": "thieving-stalls",
 			"kind": "object",
 			"name": "Gem stall",
-			"options": [
-				"steal-from"
-			],
-			"requiredCardGroups": [
-				[
-					"Uncut sapphire",
-					"Uncut emerald",
-					"Uncut ruby",
-					"Uncut diamond",
-					"Sapphire",
-					"Emerald",
-					"Ruby",
-					"Diamond"
-				]
-			],
-			"groupRoles": [
-				""
-			],
-			"requireAll": false,
-			"notes": "Gem stall (Ardougne, Keldagrim, Kourend, Prifddinas, Varlamore, Port Roberts). Any-of: player must own >=1 of these cards to steal. Loot with no card excluded: none."
-		},
-		{
-			"category": "thieving-stalls",
-			"kind": "object",
-			"name": "Gem Stall",
 			"options": [
 				"steal-from"
 			],

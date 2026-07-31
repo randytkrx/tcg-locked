@@ -21,7 +21,6 @@ import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.Rectangle;
-import java.awt.Stroke;
 import java.awt.geom.Arc2D;
 import java.awt.geom.RoundRectangle2D;
 import javax.inject.Inject;
@@ -70,16 +69,22 @@ class TcgLockedItemOverlay extends WidgetItemOverlay
 			return;
 		}
 
-		graphics.setColor(TINT);
-		graphics.fill(bounds);
-		drawPadlock(graphics, bounds);
+		Graphics2D copy = (Graphics2D) graphics.create();
+		try
+		{
+			copy.setColor(TINT);
+			copy.fill(bounds);
+			drawPadlock(copy, bounds);
+		}
+		finally
+		{
+			copy.dispose();
+		}
 	}
 
 	/** Draws a small vector padlock in the top-left corner of the slot; no image asset needed. */
 	private static void drawPadlock(Graphics2D graphics, Rectangle bounds)
 	{
-		Object prevAa = graphics.getRenderingHint(RenderingHints.KEY_ANTIALIASING);
-		Stroke prevStroke = graphics.getStroke();
 		graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
 		int bodyW = 8;
@@ -100,10 +105,5 @@ class TcgLockedItemOverlay extends WidgetItemOverlay
 		graphics.setStroke(new BasicStroke(1.0f));
 		graphics.draw(body);
 
-		graphics.setStroke(prevStroke);
-		if (prevAa != null)
-		{
-			graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, prevAa);
-		}
 	}
 }

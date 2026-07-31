@@ -131,4 +131,39 @@ public class TcgInteractionCatalogTest
 		assertNotNull(rule);
 		assertEquals("the raw fish", rule.groups.get(0).describe());
 	}
+
+	@Test
+	public void targetIdSelectsTheMatchingDuplicateRule()
+	{
+		TcgInteractionCatalog catalog = of("{\"nodes\":["
+			+ "{\"kind\":\"object\",\"name\":\"Young tree\",\"options\":[\"set-trap\"],"
+			+ "\"objectIds\":[1],\"requiredCards\":[\"Swamp lizard\"]},"
+			+ "{\"kind\":\"object\",\"name\":\"Young tree\",\"options\":[\"set-trap\"],"
+			+ "\"objectIds\":[2],\"requiredCards\":[\"Orange salamander\"]}]}");
+		TcgInteractionCatalog.Rule rule = catalog.find("object", "Young tree", "Set-trap", 2);
+		assertNotNull(rule);
+		assertTrue(rule.groups.get(0).isSatisfied(owning("orange salamander")));
+	}
+
+	@Test
+	public void conflictingDuplicateWithoutMatchingIdFailsOpen()
+	{
+		TcgInteractionCatalog catalog = of("{\"nodes\":["
+			+ "{\"kind\":\"object\",\"name\":\"Young tree\",\"options\":[\"set-trap\"],"
+			+ "\"objectIds\":[1],\"requiredCards\":[\"Swamp lizard\"]},"
+			+ "{\"kind\":\"object\",\"name\":\"Young tree\",\"options\":[\"set-trap\"],"
+			+ "\"objectIds\":[2],\"requiredCards\":[\"Orange salamander\"]}]}");
+		assertNull(catalog.find("object", "Young tree", "Set-trap", 99));
+	}
+
+	@Test
+	public void exactOptionTakesPriorityOverWildcard()
+	{
+		TcgInteractionCatalog catalog = of("{\"nodes\":["
+			+ "{\"kind\":\"npc\",\"name\":\"Man\",\"options\":[\"*\"],\"requiredCards\":[\"Coins\"]},"
+			+ "{\"kind\":\"npc\",\"name\":\"Man\",\"options\":[\"pickpocket\"],"
+			+ "\"requiredCards\":[\"Man\"]}]}");
+		TcgInteractionCatalog.Rule rule = catalog.find("npc", "Man", "Pickpocket");
+		assertTrue(rule.groups.get(0).isSatisfied(owning("man")));
+	}
 }

@@ -30,7 +30,7 @@ public interface TcgLockedConfig extends Config
 	{
 		/** Remove the equip/use menu option for locked items (soft client-side block). */
 		BLOCK,
-		/** Leave the menu alone; only warn and track when a locked item is used/worn. */
+		/** Leave the menu alone and warn when a locked action is attempted. */
 		WARN_ONLY
 	}
 
@@ -106,7 +106,7 @@ public interface TcgLockedConfig extends Config
 	@ConfigItem(
 		keyName = "enforcement",
 		name = "Enforcement",
-		description = "Block: remove the equip/use option for cards you don't own. Warn only: allow it but flag violations.",
+		description = "Block: remove locked actions. Warn only: allow them and optionally warn in chat.",
 		section = LOCKING,
 		position = 1
 	)

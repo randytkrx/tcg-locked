@@ -125,12 +125,20 @@ class TcgLockedRevealOverlay extends Overlay
 			return null;
 		}
 
-		graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+		Graphics2D copy = (Graphics2D) graphics.create();
 		int y = 0;
-		for (Reveal r : reveals)
+		try
 		{
-			drawCard(graphics, r, y, alphaFor(now - r.startMs));
-			y += CARD_H + GAP;
+			copy.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+			for (Reveal r : reveals)
+			{
+				drawCard(copy, r, y, alphaFor(now - r.startMs));
+				y += CARD_H + GAP;
+			}
+		}
+		finally
+		{
+			copy.dispose();
 		}
 		return new Dimension(CARD_W, y == 0 ? CARD_H : y - GAP);
 	}

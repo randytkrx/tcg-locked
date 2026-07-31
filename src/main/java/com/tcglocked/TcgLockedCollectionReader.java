@@ -44,25 +44,28 @@ class TcgLockedCollectionReader
 	 * individually rather than trusting the cast — the payload map is untyped, and a malformed one
 	 * should be ignored rather than throw mid-click.
 	 */
-	synchronized void onApiOwnedNames(List<?> names)
+	synchronized boolean onApiOwnedNames(List<?> names)
 	{
 		if (names == null)
 		{
-			return;
+			return false;
 		}
 		Set<String> normalized = new HashSet<>();
 		for (Object name : names)
 		{
-			if (name instanceof String)
+			if (!(name instanceof String))
 			{
-				String trimmed = ((String) name).trim();
-				if (!trimmed.isEmpty())
-				{
-					normalized.add(trimmed.toLowerCase(Locale.ROOT));
-				}
+				return false;
 			}
+			String trimmed = ((String) name).trim();
+			if (trimmed.isEmpty())
+			{
+				return false;
+			}
+			normalized.add(trimmed.toLowerCase(Locale.ROOT));
 		}
 		ownedLower = Collections.unmodifiableSet(normalized);
+		return true;
 	}
 
 	/**
@@ -84,9 +87,9 @@ class TcgLockedCollectionReader
 		ownedLower = null;
 	}
 
-	/** @return lower-cased owned card names, or an empty set while the collection is unknown. */
-	synchronized Set<String> readOwnedCardNamesLower()
+	/** @return one immutable atomic snapshot, or null while the collection is unknown. */
+	synchronized Set<String> snapshotOrNull()
 	{
-		return ownedLower == null ? Collections.emptySet() : ownedLower;
+		return ownedLower;
 	}
 }

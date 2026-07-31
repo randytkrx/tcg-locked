@@ -34,6 +34,12 @@ Consumables are optional. When enabled you cannot eat or drink an item without i
 card. A one click difficulty picker sets all of this for you, or choose Custom to
 control each lock yourself.
 
+The Everything difficulty can also lock activities such as gathering and production
+behind their relevant cards. RuneLite can block menu-driven actions, but the game does
+not expose a supported cancellable event for Space-bar Make-X defaults or interfaces
+that start production automatically. Those paths remain honour-system limitations
+rather than relying on brittle client-script hooks.
+
 ## Playing as a group
 
 Join a RuneLite party and TCG Locked pools the whole group's collection. A card
@@ -47,9 +53,6 @@ A side panel tracks your run: cards owned, unlocks this session, a feed of your
 most recent unlocks, a collection lockbook of everything you have seen with a
 locked or unlocked filter, and what you are carrying that is still locked. When a
 new card frees an item, a reveal card shows the item art with a chime.
-
-The Shared Cards button opens a searchable catalog of every item and NPC card,
-including which synced party member owns each card.
 
 A bronze starter option keeps basic bronze gear usable so you are never fully
 locked out, and an always allow list lets you exempt anything by name.
@@ -68,7 +71,7 @@ gear.
 
 ## Bugs and feature requests
 
-There is a Discord for the plugin at https://discord.gg/tcglocked, linked from the
+There is a Discord for the plugin at https://discord.gg/P4pPu6RnCj, linked from the
 bottom of the side panel. Bug reports, feature requests and general questions are
 all welcome there.
 
@@ -78,6 +81,8 @@ TCG plugin or its developers.
 ## Building
 
 This is a standard RuneLite external plugin. Build it with Gradle:
+
+The Gradle wrapper requires JDK 17 or newer and compiles the plugin for Java 11.
 
 ```
 ./gradlew build

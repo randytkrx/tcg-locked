@@ -64,6 +64,10 @@ public class TcgInteractionKindMappingTest
 			TcgLockedPlugin.kindsFor(MenuAction.CC_OP, component(InterfaceID.SKILLMULTI)));
 		assertEquals(List.of(TcgInteractionCatalog.KIND_INTERFACE),
 			TcgLockedPlugin.kindsFor(MenuAction.CC_OP, component(InterfaceID.SMITHING)));
+		assertEquals(List.of(TcgInteractionCatalog.KIND_INTERFACE),
+			TcgLockedPlugin.kindsFor(MenuAction.CC_OP, component(InterfaceID.SAILING_MENU)));
+		assertEquals(List.of(TcgInteractionCatalog.KIND_INTERFACE),
+			TcgLockedPlugin.kindsFor(MenuAction.CC_OP, component(InterfaceID.SAILING_CUSTOMISATION)));
 	}
 
 	@Test
@@ -95,5 +99,16 @@ public class TcgInteractionKindMappingTest
 		assertTrue(TcgLockedPlugin.kindsFor(MenuAction.WALK, 0).isEmpty());
 		assertTrue(TcgLockedPlugin.kindsFor(MenuAction.EXAMINE_OBJECT, 0).isEmpty());
 		assertTrue(TcgLockedPlugin.kindsFor(MenuAction.CANCEL, 0).isEmpty());
+	}
+
+	@Test
+	public void genericUseOnlyAppliesToInventorySourceSelection()
+	{
+		assertTrue(TcgLockedPlugin.isInventoryItemUse(
+			MenuAction.WIDGET_TARGET, component(InterfaceID.INVENTORY), "use"));
+		assertTrue(!TcgLockedPlugin.isInventoryItemUse(
+			MenuAction.WIDGET_TARGET, component(InterfaceID.BANKMAIN), "use"));
+		assertTrue(!TcgLockedPlugin.isInventoryItemUse(
+			MenuAction.CC_OP, component(InterfaceID.INVENTORY), "use"));
 	}
 }

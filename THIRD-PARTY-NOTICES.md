@@ -11,11 +11,8 @@ reproduced in full as those licences require.
 `src/main/resources/resource_nodes.json` in Bronzeman TCG
 (https://github.com/Felmeme/bronzeman-tcg). The interaction schema it encodes
 (`kind`, `options`, `requiredCardGroups`, `groupRoles`, `groupLabels`,
-`requireAll`) is Felmeme's design, and `TcgInteractionCatalog` reads it
-unchanged so the two plugins stay compatible.
-
-Only attribution keys (`_source`, `_copyright`, `_license`) were added at the
-top of the file. No entries were altered.
+`requireAll`) is Felmeme's design. TCG Locked adapts ambiguous entries where
+the RuneLite interaction cannot identify a mode or target safely.
 
 ```
 BSD 2-Clause License

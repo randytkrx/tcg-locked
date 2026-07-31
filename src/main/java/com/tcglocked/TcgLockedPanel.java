@@ -76,7 +76,7 @@ class TcgLockedPanel extends PluginPanel
 	private static final Color BORDER = new Color(0x3B, 0x3B, 0x3B);
 	private static final Color SUCCESS = new Color(0x62, 0xB5, 0x72);
 	/** Where players are pointed for bugs and requests. */
-	private static final String DISCORD_URL = "https://discord.gg/tcglocked";
+	private static final String DISCORD_URL = "https://discord.gg/P4pPu6RnCj";
 	private static final int MAX_RECENT_ROWS = 8;
 	private static final int MAX_BAG_ROWS = 10;
 	private static final int LOCKBOOK_GRID_CAP = 150;
@@ -92,7 +92,6 @@ class TcgLockedPanel extends PluginPanel
 	private final ItemManager itemManager;
 	private final JPanel body = new JPanel();
 	private Runnable refreshAction = TcgLockedPanel::noop;
-	private Runnable sharedCatalogAction = TcgLockedPanel::noop;
 	/** (player name, approved) — set by the plugin so the pooling controls can act. */
 	private BiConsumer<String, Boolean> consentAction = TcgLockedPanel::noConsent;
 	private LockFilter filter = LockFilter.ALL;
@@ -125,11 +124,6 @@ class TcgLockedPanel extends PluginPanel
 		this.refreshAction = action == null ? TcgLockedPanel::noop : action;
 	}
 
-	void setSharedCatalogAction(Runnable action)
-	{
-		this.sharedCatalogAction = action == null ? TcgLockedPanel::noop : action;
-	}
-
 	void setConsentAction(BiConsumer<String, Boolean> action)
 	{
 		this.consentAction = action == null ? TcgLockedPanel::noConsent : action;
@@ -150,6 +144,11 @@ class TcgLockedPanel extends PluginPanel
 		render(status);
 		revalidate();
 		repaint();
+	}
+
+	void reset()
+	{
+		update(emptyStatus());
 	}
 
 	private void render(TcgLockedStatus status)
@@ -202,9 +201,6 @@ class TcgLockedPanel extends PluginPanel
 	private JPanel buildParty(TcgLockedStatus status)
 	{
 		JPanel list = vBox();
-		list.add(sharedCatalogButton());
-		list.add(vGap(7));
-
 		if (status.party.isEmpty())
 		{
 			list.add(emptyLine("No synced partners yet."));
@@ -263,21 +259,6 @@ class TcgLockedPanel extends PluginPanel
 			}
 		}
 		return list;
-	}
-
-	private JButton sharedCatalogButton()
-	{
-		JButton button = new JButton("Open shared catalog");
-		button.setFocusPainted(false);
-		button.setFont(FontManager.getRunescapeSmallFont());
-		button.setForeground(GROUP_BLUE);
-		button.setBackground(SURFACE_RAISED);
-		button.setBorder(new CompoundBorder(new MatteBorder(1, 1, 1, 1, GROUP_BLUE.darker()),
-			BorderFactory.createEmptyBorder(5, 8, 5, 8)));
-		button.setAlignmentX(Component.LEFT_ALIGNMENT);
-		button.setMaximumSize(new Dimension(Integer.MAX_VALUE, 29));
-		button.addActionListener(event -> sharedCatalogAction.run());
-		return button;
 	}
 
 	/** What one synced partner is contributing: cards lent, and how many of your items only they open. */
