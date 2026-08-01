@@ -79,7 +79,16 @@ class TcgInteractionGate
 		{
 			return false;
 		}
-		switch (role.trim().toLowerCase(java.util.Locale.ROOT))
+		String normalized = role.trim().toLowerCase(java.util.Locale.ROOT);
+		// Drop tables: loot, loot-elf, loot-ham. These record what an action yields, so requiring
+		// them would make the reward its own entry price — a H.A.M. Member needs all 37 of its
+		// drops before the first steal. Matched by prefix so a new loot-* variant cannot lock a
+		// skill by being added to the data alone.
+		if (normalized.startsWith("loot"))
+		{
+			return true;
+		}
+		switch (normalized)
 		{
 			case "creature":
 			case "extra":
