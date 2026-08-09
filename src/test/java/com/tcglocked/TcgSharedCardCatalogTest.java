@@ -67,6 +67,19 @@ public class TcgSharedCardCatalogTest
 			catalog.cards(), snapshot, "alice", TcgSharedCardCatalog.Category.ITEM, true, "")));
 	}
 
+	@Test
+	public void snapshotRetainsApprovedOwnersWithoutCardsInStableOrder()
+	{
+		Map<String, Set<String>> owners = new HashMap<>();
+		owners.put("zoe", null);
+		owners.put("alice", Collections.singleton("rope"));
+		TcgSharedCatalogSnapshot snapshot = new TcgSharedCatalogSnapshot(owners);
+
+		assertEquals(Arrays.asList("alice", "zoe"), snapshot.owners());
+		assertEquals(Collections.emptySet(), snapshot.keysFor("zoe"));
+		assertEquals(Collections.singleton("rope"), snapshot.combinedKeys());
+	}
+
 	private void assertCard(String name, String key, TcgSharedCardCatalog.Category category)
 	{
 		TcgSharedCardCatalog.Card card = card(name);

@@ -66,6 +66,7 @@ final class TcgSharedCatalogWindow extends JFrame
 	private final JLabel pageLabel = new JLabel();
 	private TcgSharedCatalogSnapshot snapshot = new TcgSharedCatalogSnapshot(Collections.emptyMap());
 	private int page;
+	private boolean refreshingOwners;
 
 	TcgSharedCatalogWindow(TcgSharedCardCatalog catalog, ItemManager itemManager,
 		TcgSharedNpcImageCache npcImages, Map<String, Integer> itemIds)
@@ -94,25 +95,37 @@ final class TcgSharedCatalogWindow extends JFrame
 	void setItemIds(Map<String, Integer> itemIds)
 	{
 		this.itemIds = itemIds;
+		if (owner.getItemCount() > 0)
+		{
+			render();
+		}
 	}
 
 	void refresh(TcgSharedCatalogSnapshot snapshot)
 	{
 		String selected = owner.getSelectedIndex() <= 0 ? null : (String) owner.getSelectedItem();
 		this.snapshot = snapshot;
-		owner.removeAllItems();
-		owner.addItem("Everyone");
-		for (String name : snapshot.owners())
+		refreshingOwners = true;
+		try
 		{
-			owner.addItem(name);
+			owner.removeAllItems();
+			owner.addItem("Everyone");
+			for (String name : snapshot.owners())
+			{
+				owner.addItem(name);
+			}
+			if (selected != null && snapshot.owners().contains(selected))
+			{
+				owner.setSelectedItem(selected);
+			}
+			else
+			{
+				owner.setSelectedIndex(0);
+			}
 		}
-		if (selected != null && snapshot.owners().contains(selected))
+		finally
 		{
-			owner.setSelectedItem(selected);
-		}
-		else
-		{
-			owner.setSelectedIndex(0);
+			refreshingOwners = false;
 		}
 		page = 0;
 		render();
@@ -183,7 +196,13 @@ final class TcgSharedCatalogWindow extends JFrame
 			}
 		};
 		search.getDocument().addDocumentListener(listener);
-		owner.addActionListener(event -> resetAndRender());
+		owner.addActionListener(event ->
+		{
+			if (!refreshingOwners)
+			{
+				resetAndRender();
+			}
+		});
 		category.addActionListener(event -> resetAndRender());
 		sharedOnly.addActionListener(event -> resetAndRender());
 		previous.addActionListener(event ->

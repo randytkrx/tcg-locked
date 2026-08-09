@@ -81,6 +81,36 @@ public class TcgPartyProgressPolicyTest
 		assertEquals(empty, pooled.get("partner"));
 	}
 
+	@Test
+	public void addressedUnapprovedSnapshotIsOnlyOffered()
+	{
+		Map<String, Set<String>> offered = new HashMap<>();
+		Map<String, Set<String>> pooled = new HashMap<>();
+		Set<String> sent = keys("rope", "shark");
+
+		TcgPartyProgressPolicy.Result result = TcgPartyProgressPolicy.apply(
+			offered, pooled, "partner", true, sent, false);
+
+		assertTrue(result.isAccepted());
+		assertFalse(result.isPooled());
+		assertEquals(sent, offered.get("partner"));
+		assertFalse(pooled.containsKey("partner"));
+	}
+
+	@Test
+	public void unresolvedPartnerDoesNotMutateCollections()
+	{
+		Map<String, Set<String>> offered = new HashMap<>();
+		Map<String, Set<String>> pooled = new HashMap<>();
+
+		TcgPartyProgressPolicy.Result result = TcgPartyProgressPolicy.apply(
+			offered, pooled, "", true, keys("rope"), true);
+
+		assertFalse(result.isAccepted());
+		assertTrue(offered.isEmpty());
+		assertTrue(pooled.isEmpty());
+	}
+
 	private static Set<String> keys(String... values)
 	{
 		return new HashSet<>(Arrays.asList(values));

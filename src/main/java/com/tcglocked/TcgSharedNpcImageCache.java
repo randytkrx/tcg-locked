@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Consumer;
 import javax.imageio.ImageIO;
 import javax.inject.Inject;
@@ -39,6 +40,7 @@ final class TcgSharedNpcImageCache
 	private static final int MEMORY_ENTRIES = 128;
 	private static final int MAX_EDGE = 130;
 
+	private final Path cacheDirectory;
 	private final Map<String, BufferedImage> memory = new LinkedHashMap<String, BufferedImage>(
 		MEMORY_ENTRIES + 1, .75f, true)
 	{
@@ -55,20 +57,27 @@ final class TcgSharedNpcImageCache
 	@Inject
 	TcgSharedNpcImageCache()
 	{
+		this(Path.of(RuneLite.RUNELITE_DIR.getAbsolutePath(), "OSRS-TCG", "images-v2"));
+	}
+
+	TcgSharedNpcImageCache(Path cacheDirectory)
+	{
+		this.cacheDirectory = cacheDirectory;
 	}
 
 	synchronized void start()
 	{
-		generation++;
-		if (executor == null)
+		if (executor != null)
 		{
-			executor = Executors.newFixedThreadPool(4, runnable ->
-			{
-				Thread thread = new Thread(runnable, "tcg-shared-npc-image");
-				thread.setDaemon(true);
-				return thread;
-			});
+			return;
 		}
+		generation++;
+		executor = Executors.newFixedThreadPool(4, runnable ->
+		{
+			Thread thread = new Thread(runnable, "tcg-shared-npc-image");
+			thread.setDaemon(true);
+			return thread;
+		});
 	}
 
 	void get(String rawUrl, Consumer<BufferedImage> consumer)
@@ -79,34 +88,50 @@ final class TcgSharedNpcImageCache
 			return;
 		}
 		final BufferedImage cached;
-		final ExecutorService currentExecutor;
-		final int requestGeneration;
-		final boolean first;
+		boolean unavailable;
 		synchronized (this)
 		{
 			cached = memory.get(url);
-			if (cached != null)
+			unavailable = executor == null;
+			if (cached == null && !unavailable)
 			{
-				currentExecutor = null;
-				requestGeneration = generation;
-				first = false;
-			}
-			else
-			{
-				currentExecutor = executor;
-				requestGeneration = generation;
 				List<Consumer<BufferedImage>> consumers = pending.computeIfAbsent(url, key -> new ArrayList<>());
-				first = consumers.isEmpty();
+				boolean first = consumers.isEmpty();
 				consumers.add(consumer);
+				if (first)
+				{
+					final int requestGeneration = generation;
+					try
+					{
+						executor.execute(() ->
+						{
+							BufferedImage image = null;
+							try
+							{
+								image = load(url);
+							}
+							catch (RuntimeException ex)
+							{
+								log.debug("TCG Locked: unable to read OSRS TCG image cache", ex);
+							}
+							complete(url, requestGeneration, image);
+						});
+					}
+					catch (RejectedExecutionException ex)
+					{
+						pending.remove(url);
+						unavailable = true;
+					}
+				}
 			}
 		}
 		if (cached != null)
 		{
 			SwingUtilities.invokeLater(() -> consumer.accept(cached));
 		}
-		else if (first && currentExecutor != null)
+		else if (unavailable)
 		{
-			currentExecutor.execute(() -> complete(url, requestGeneration, load(url)));
+			SwingUtilities.invokeLater(() -> consumer.accept(null));
 		}
 	}
 
@@ -115,8 +140,12 @@ final class TcgSharedNpcImageCache
 		final List<Consumer<BufferedImage>> consumers;
 		synchronized (this)
 		{
+			if (requestGeneration != generation)
+			{
+				return;
+			}
 			consumers = pending.remove(url);
-			if (requestGeneration != generation || consumers == null)
+			if (consumers == null)
 			{
 				return;
 			}
@@ -185,10 +214,9 @@ final class TcgSharedNpcImageCache
 		return scaled;
 	}
 
-	private static Path cacheFile(String normalizedUrl)
+	Path cacheFile(String normalizedUrl)
 	{
-		return Path.of(RuneLite.RUNELITE_DIR.getAbsolutePath(), "OSRS-TCG", "images-v2",
-			sha256Hex(normalizedUrl) + ".png");
+		return cacheDirectory.resolve(sha256Hex(normalizedUrl) + ".png");
 	}
 
 	static String normalizeUrl(String rawUrl)
