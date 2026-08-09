@@ -56,6 +56,9 @@ public class TcgCardCatalogTest
 		assertTrue(carded("Bandos chestplate"));
 		assertTrue(carded("Twisted bow"));
 		assertTrue(carded("Shark"));
+		assertTrue(carded("Weapon poison"));
+		assertTrue(carded("Weapon poison+"));
+		assertTrue(carded("Weapon poison++"));
 	}
 
 	@Test

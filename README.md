@@ -54,6 +54,12 @@ most recent unlocks, a collection lockbook of everything you have seen with a
 locked or unlocked filter, and what you are carrying that is still locked. When a
 new card frees an item, a reveal card shows the item art with a chime.
 
+The Shared Cards window lists the item and NPC cards pooled by your group. Item
+art comes from RuneLite's local game cache. NPC portraits share OSRS TCG's
+persistent image cache, so artwork already downloaded by that plugin is reused.
+Cards without a cached portrait use a local placeholder; TCG Locked makes no
+image requests.
+
 A bronze starter option keeps basic bronze gear usable so you are never fully
 locked out, and an always allow list lets you exempt anything by name.
 
