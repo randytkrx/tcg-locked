@@ -77,13 +77,3 @@ all welcome there.
 
 TCG Locked is an unofficial community plugin and is not affiliated with the OSRS
 TCG plugin or its developers.
-
-## Building
-
-This is a standard RuneLite external plugin. Build it with Gradle:
-
-The Gradle wrapper requires JDK 17 or newer and compiles the plugin for Java 11.
-
-```
-./gradlew build
-```
