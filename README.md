@@ -42,10 +42,14 @@ rather than relying on brittle client-script hooks.
 
 ## Playing as a group
 
-Join a RuneLite party and TCG Locked pools the whole group's collection. A card
-owned by any member unlocks that item for everyone, so you can grind a shared
-unlock together. The panel lists every member's progress, and chat announces each
-unlock as it happens.
+Create or join a group through the OSRS TCG website and set the members'
+collections to public. TCG Locked receives your group code from the OSRS TCG
+plugin automatically, then pools the combined collection even while other members
+are offline. It checks the lightweight group revision every five minutes and only
+downloads the combined collection when that revision changes.
+
+Existing RuneLite party groups continue to work. Their approvals and saved pooled
+progress are kept separately, so updating does not discard an established run.
 
 ## The panel and the unlocks
 
@@ -74,6 +78,14 @@ Until OSRS TCG has answered, TCG Locked locks nothing at all and the panel says
 so. "No collection yet" means the challenge is not running, never that you own no
 cards, so a missing or outdated OSRS TCG plugin can't leave you unable to use your
 gear.
+
+## Network and privacy
+
+Solo ownership is exchanged locally between RuneLite plugins. When group pooling
+is enabled and OSRS TCG reports a group code, TCG Locked sends that code to the
+public group endpoints at `osrs-tcg.net`. This exposes your IP address and group
+code to that third-party service. TCG Locked does not receive or send your OSRS TCG
+login token. Disable **Pool group cards** to stop these group requests.
 
 ## Bugs and feature requests
 

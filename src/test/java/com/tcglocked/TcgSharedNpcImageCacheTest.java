@@ -78,6 +78,26 @@ public class TcgSharedNpcImageCacheTest
 		}
 	}
 
+	@Test
+	public void betaImageCacheRemainsReadable() throws IOException, InterruptedException
+	{
+		java.nio.file.Path current = temporaryFolder.newFolder("images-v4").toPath();
+		java.nio.file.Path beta = temporaryFolder.newFolder("images-v2").toPath();
+		TcgSharedNpcImageCache cache = new TcgSharedNpcImageCache(current, beta);
+		String url = "https://oldschool.runescape.wiki/images/beta-card.png";
+		java.nio.file.Path betaFile = beta.resolve(TcgSharedNpcImageCache.sha256Hex(url) + ".png");
+		ImageIO.write(new BufferedImage(3, 3, BufferedImage.TYPE_INT_ARGB), "png", betaFile.toFile());
+		cache.start();
+		try
+		{
+			assertEquals(3, await(cache, url).getWidth());
+		}
+		finally
+		{
+			cache.dispose();
+		}
+	}
+
 	private static BufferedImage await(TcgSharedNpcImageCache cache, String url) throws InterruptedException
 	{
 		CountDownLatch completed = new CountDownLatch(1);

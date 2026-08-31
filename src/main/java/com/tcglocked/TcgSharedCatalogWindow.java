@@ -271,7 +271,8 @@ final class TcgSharedCatalogWindow extends JFrame
 
 		int itemId = card.category == TcgSharedCardCatalog.Category.ITEM
 			? itemIds.getOrDefault(card.key, -1) : -1;
-		cell.add(new LocalCardIcon(itemManager, npcImages, itemId, card.category, card.imageUrl, shared),
+		cell.add(new LocalCardIcon(itemManager, npcImages, itemId, card.category,
+			card.imageUrl, card.legacyImageUrl, shared),
 			BorderLayout.CENTER);
 
 		JPanel details = new JPanel();
@@ -315,7 +316,7 @@ final class TcgSharedCatalogWindow extends JFrame
 		private BufferedImage npcImage;
 
 		private LocalCardIcon(ItemManager itemManager, TcgSharedNpcImageCache npcImages, int itemId,
-			TcgSharedCardCatalog.Category category, String imageUrl, boolean shared)
+			TcgSharedCardCatalog.Category category, String imageUrl, String legacyImageUrl, boolean shared)
 		{
 			this.image = itemId > 0 ? itemManager.getImage(itemId) : null;
 			this.category = category;
@@ -328,8 +329,17 @@ final class TcgSharedCatalogWindow extends JFrame
 			{
 				npcImages.get(imageUrl, loaded ->
 				{
-					npcImage = loaded;
-					repaint();
+					if (loaded != null || legacyImageUrl == null || legacyImageUrl.equals(imageUrl))
+					{
+						npcImage = loaded;
+						repaint();
+						return;
+					}
+					npcImages.get(legacyImageUrl, fallback ->
+					{
+						npcImage = fallback;
+						repaint();
+					});
 				});
 			}
 		}

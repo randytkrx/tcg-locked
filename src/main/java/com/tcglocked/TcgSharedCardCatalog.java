@@ -18,12 +18,13 @@ import java.util.Map;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 
-/** Bundled card names for the Shared Cards window. No image URLs or network metadata are stored. */
+/** Bundled card names and local-cache image identities for the Shared Cards window. */
 @Singleton
 final class TcgSharedCardCatalog
 {
 	private static final String ITEM_RESOURCE = "item-cards.txt";
 	private static final String NPC_IMAGE_RESOURCE = "npc-card-images.tsv";
+	private static final String BETA_NPC_IMAGE_RESOURCE = "beta-npc-card-images.tsv";
 
 	enum Category
 	{
@@ -43,6 +44,7 @@ final class TcgSharedCardCatalog
 		final String key;
 		final Category category;
 		final String imageUrl;
+		String legacyImageUrl;
 
 		private Card(String name, Category category, String imageUrl)
 		{
@@ -76,14 +78,37 @@ final class TcgSharedCardCatalog
 
 	private void loadNpcs(Map<String, Card> loaded)
 	{
-		read(NPC_IMAGE_RESOURCE, line ->
+		loadNpcResource(loaded, NPC_IMAGE_RESOURCE, false);
+		// Keep beta-only cards visible; current v1 artwork wins when both catalogs contain a card.
+		loadNpcResource(loaded, BETA_NPC_IMAGE_RESOURCE, true);
+	}
+
+	private void loadNpcResource(Map<String, Card> loaded, String resource, boolean legacy)
+	{
+		read(resource, line ->
 		{
 			String[] fields = line.split("\\t", 2);
 			if (fields.length != 2)
 			{
 				throw new IllegalStateException("Malformed NPC image catalog line");
 			}
-			add(loaded, unescape(fields[0]), Category.NPC, unescape(fields[1]));
+			String name = unescape(fields[0]);
+			String imageUrl = unescape(fields[1]);
+			String key = Category.NPC.name() + '|' + TcgItemNameNormalizer.normalize(name);
+			Card existing = loaded.get(key);
+			if (legacy && existing != null)
+			{
+				existing.legacyImageUrl = imageUrl;
+			}
+			else
+			{
+				add(loaded, name, Category.NPC, imageUrl);
+				Card added = loaded.get(key);
+				if (legacy && added != null)
+				{
+					added.legacyImageUrl = imageUrl;
+				}
+			}
 		});
 	}
 

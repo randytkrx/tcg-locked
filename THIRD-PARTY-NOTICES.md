@@ -46,11 +46,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## OSRS TCG
 
-`src/main/resources/com/tcglocked/npc-card-images.tsv` is generated from
-`src/main/resources/Card.json` in OSRS TCG
-(https://github.com/Azderi/osrs-tcg). TCG Locked also uses the same persistent
-image-cache naming and location so the two plugins do not download duplicate
-copies of card artwork.
+The bundled card catalogs and `npc-card-images.tsv` are generated from OSRS TCG's
+public v1 live catalog (https://github.com/Azderi/osrs-tcg). TCG Locked also uses
+the same persistent image-cache naming and location so the two plugins do not
+download duplicate copies of card artwork.
 
 ```
 BSD 2-Clause License

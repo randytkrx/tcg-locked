@@ -32,7 +32,7 @@ import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.RuneLite;
 
-/** Reads OSRS TCG's persistent NPC-art cache without making network requests. */
+/** Reads OSRS TCG's persistent card-art cache without making network requests. */
 @Slf4j
 @Singleton
 final class TcgSharedNpcImageCache
@@ -41,6 +41,7 @@ final class TcgSharedNpcImageCache
 	private static final int MAX_EDGE = 130;
 
 	private final Path cacheDirectory;
+	private final Path legacyCacheDirectory;
 	private final Map<String, BufferedImage> memory = new LinkedHashMap<String, BufferedImage>(
 		MEMORY_ENTRIES + 1, .75f, true)
 	{
@@ -57,12 +58,19 @@ final class TcgSharedNpcImageCache
 	@Inject
 	TcgSharedNpcImageCache()
 	{
-		this(Path.of(RuneLite.RUNELITE_DIR.getAbsolutePath(), "OSRS-TCG", "images-v2"));
+		this(Path.of(RuneLite.RUNELITE_DIR.getAbsolutePath(), "OSRS-TCG", "images-v4"),
+			Path.of(RuneLite.RUNELITE_DIR.getAbsolutePath(), "OSRS-TCG", "images-v2"));
 	}
 
 	TcgSharedNpcImageCache(Path cacheDirectory)
 	{
+		this(cacheDirectory, null);
+	}
+
+	TcgSharedNpcImageCache(Path cacheDirectory, Path legacyCacheDirectory)
+	{
 		this.cacheDirectory = cacheDirectory;
+		this.legacyCacheDirectory = legacyCacheDirectory;
 	}
 
 	synchronized void start()
@@ -170,7 +178,13 @@ final class TcgSharedNpcImageCache
 
 	private BufferedImage readDisk(String url)
 	{
-		Path file = cacheFile(url);
+		BufferedImage current = readDiskFile(cacheFile(cacheDirectory, url));
+		return current != null || legacyCacheDirectory == null
+			? current : readDiskFile(cacheFile(legacyCacheDirectory, url));
+	}
+
+	private BufferedImage readDiskFile(Path file)
+	{
 		if (!Files.isRegularFile(file))
 		{
 			return null;
@@ -216,7 +230,12 @@ final class TcgSharedNpcImageCache
 
 	Path cacheFile(String normalizedUrl)
 	{
-		return cacheDirectory.resolve(sha256Hex(normalizedUrl) + ".png");
+		return cacheFile(cacheDirectory, normalizedUrl);
+	}
+
+	private static Path cacheFile(Path directory, String normalizedUrl)
+	{
+		return directory.resolve(sha256Hex(normalizedUrl) + ".png");
 	}
 
 	static String normalizeUrl(String rawUrl)
@@ -247,7 +266,7 @@ final class TcgSharedNpcImageCache
 		generation++;
 		if (executor != null)
 		{
-			executor.shutdownNow();
+			executor.shutdown();
 			executor = null;
 		}
 		pending.clear();

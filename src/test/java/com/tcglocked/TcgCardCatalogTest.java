@@ -17,6 +17,7 @@
 package com.tcglocked;
 
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
@@ -47,6 +48,19 @@ public class TcgCardCatalogTest
 		// entirely (everything uncarded) rather than fail loudly.
 		assertTrue("expected the item catalog to load", catalog.itemCardCount() > 5000);
 		assertTrue("expected the monster catalog to load", catalog.npcCount() > 1000);
+		assertEquals(7822, catalog.itemIdCount());
+		assertEquals(5670, catalog.npcIdCount());
+	}
+
+	@Test
+	public void currentBaseAndVariantIdsAreCarded()
+	{
+		assertTrue(catalog.hasItemCard(2));
+		assertTrue(catalog.hasItemCard(31922));
+		assertTrue(catalog.hasNpcCard(0));
+		assertTrue(catalog.hasNpcCard(757));
+		assertFalse(catalog.hasItemCard(Integer.MAX_VALUE));
+		assertFalse(catalog.hasNpcCard(Integer.MAX_VALUE));
 	}
 
 	@Test
@@ -66,12 +80,9 @@ public class TcgCardCatalogTest
 	{
 		// Real items with no card in the catalog. Gating these would be a permanent dead end: there
 		// is no card to collect, so they must stay outside the challenge.
-		assertFalse(carded("Salve amulet"));
 		assertFalse(carded("Max cape"));
 		assertFalse(carded("Quest point cape"));
 		assertFalse(carded("Varrock teleport"));
-		assertFalse(carded("Iban's staff"));
-		assertFalse(carded("Holy symbol"));
 	}
 
 	@Test
@@ -94,9 +105,20 @@ public class TcgCardCatalogTest
 
 		// One in-game name shared by several cards; owning any of them unlocks it.
 		Set<String> archer = npcCards("Archer");
-		assertEquals(2, archer.size());
+		assertEquals(3, archer.size());
+		assertTrue(archer.contains("archer"));
 		assertTrue(archer.contains("archer (ardougne)"));
 		assertTrue(archer.contains("archer (burthorpe)"));
+	}
+
+	@Test
+	public void currentNamesAndCollisionStorageIdentitiesAreAvailable()
+	{
+		assertTrue(carded("Steel cannonball"));
+		assertTrue(npcCards("Tool Leprechaun").contains("tool leprechaun"));
+		assertTrue(npcCards("Manta ray").contains("npc:15220"));
+		assertTrue(npcCards("Manta ray").contains("manta ray (monster)"));
+		assertTrue(carded("Manta ray"));
 	}
 
 	@Test
@@ -131,8 +153,38 @@ public class TcgCardCatalogTest
 	public void packedCollectionCarriesCatalogVersion()
 	{
 		String packed = catalog.packKeys(Collections.singleton("abyssal whip"));
-		assertTrue(packed.startsWith("2:"));
-		assertNull(catalog.unpackKeysOrNull("2:wrongcatalog:" + packed.substring(packed.lastIndexOf(':') + 1)));
+		assertTrue(packed.startsWith("3:"));
+		assertNull(catalog.unpackKeysOrNull("3:wrongcatalog:" + packed.substring(packed.lastIndexOf(':') + 1)));
+	}
+
+	@Test
+	public void releasedV2CatalogStillDecodesWithItsOriginalIndex()
+	{
+		String packed = "2:03e058b9aa7479d7:zeNpjYAADFgYmhlEwCmgKFIaaZQA0PQBH";
+		assertEquals(new HashSet<>(Arrays.asList(
+			"abyssal whip", "twisted bow", "shark", "abyssal demon")), catalog.unpackKeys(packed));
+	}
+
+	@Test
+	public void releasedV2FullCollectionStillDecodes()
+	{
+		byte[] allOwned = new byte[(6376 + 7) / 8];
+		Arrays.fill(allOwned, (byte) 0xff);
+		Set<String> decoded = catalog.unpackKeys(
+			"2:03e058b9aa7479d7:b" + Base64.getEncoder().encodeToString(allOwned));
+		assertEquals(6376, decoded.size());
+		assertTrue(decoded.contains("abyssal whip"));
+		assertTrue(decoded.contains("manta ray (monster)"));
+	}
+
+	@Test
+	public void releasedV2BitmapMergesV1OnlyRawKeys()
+	{
+		String packed = "2:03e058b9aa7479d7:zeNpjYAADFgYmhlEwCmgKFIaaZQA0PQBH";
+		Set<String> merged = catalog.mergePackedAndRawKeys(packed,
+			new HashSet<>(Arrays.asList("abyssal whip", "npc:15220")));
+		assertTrue(merged.contains("abyssal demon"));
+		assertTrue(merged.contains("npc:15220"));
 	}
 
 	@Test
@@ -158,6 +210,14 @@ public class TcgCardCatalogTest
 		assertEquals(Collections.singleton("abyssal whip"),
 			catalog.filterKnownKeys(Collections.singleton("abyssal whip")));
 		assertNull(catalog.filterKnownKeys(Collections.singleton("not a card")));
+	}
+
+	@Test
+	public void fallbackOwnedKeysExcludeKeysUnknownToV2Clients()
+	{
+		Set<String> mixed = new HashSet<>(Arrays.asList("abyssal whip", "npc:15220"));
+		assertEquals(Collections.singleton("abyssal whip"), catalog.filterLegacyKeys(mixed));
+		assertTrue(catalog.filterLegacyKeys(null).isEmpty());
 	}
 
 	@Test

@@ -272,9 +272,9 @@ public interface TcgLockedConfig extends Config
 
 	@ConfigItem(
 		keyName = "partyShare",
-		name = "Share with party",
-		description = "When in a RuneLite party, share your unlock progress and announce your unlocks, and show a "
-			+ "party progress list in the panel.",
+		name = "Pool group cards",
+		description = "Pool cards from your public OSRS TCG group, including offline members. RuneLite party "
+			+ "sharing and progress remain available for existing groups.",
 		section = FEEDBACK,
 		position = 7
 	)

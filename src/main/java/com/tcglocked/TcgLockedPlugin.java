@@ -27,6 +27,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 import javax.inject.Inject;
@@ -89,6 +90,10 @@ public class TcgLockedPlugin extends Plugin
 	/** CSV of the RuneScape names whose collections are stored; each blob lives under its own key. */
 	private static final String POOLED_PARTNERS_KEY = "pooledPartners";
 	private static final String POOLED_PREFIX = "pooled_";
+	private static final String TCG_GROUP_CACHE_KEY = "tcgGroupKey";
+	private static final String TCG_GROUP_CACHE_REVISION = "tcgGroupRevision";
+	private static final String TCG_GROUP_CACHE_CARDS = "tcgGroupCards";
+	private static final String TCG_GROUP_LABEL = "OSRS TCG group";
 	private static final int RECENT_UNLOCK_CAP = 30;
 	/** Splits a use-on menu target, as in "Knife -> Yew tree". */
 	private static final String USED_ON_SEPARATOR = " -> ";
@@ -105,8 +110,13 @@ public class TcgLockedPlugin extends Plugin
 	private static final String TCG_API_REPLY = "owned-names";
 	private static final String TCG_API_CHANGED = "owned-names-changed";
 	private static final String TCG_API_NAMES_KEY = "ownedNames";
+	private static final String TCG_API_ITEM_IDS_KEY = "ownedItemIds";
+	private static final String TCG_API_NPC_IDS_KEY = "ownedNpcIds";
+	private static final String TCG_API_GROUP_KEY = "groupKey";
 	/** Re-query cadence (game ticks) until OSRS TCG answers — covers it starting after us. */
 	private static final int API_QUERY_RETRY_TICKS = 100;
+	/** Public group metadata is cheap, but intentionally polled no more than every five minutes. */
+	private static final int GROUP_META_REFRESH_TICKS = 500;
 	/**
 	 * Game ticks of no new cards before held unlocks are shown. Ticks are 600ms, so this is ~4.8s:
 	 * longer than the gap between flipping one card and the next, short enough that a single unlock
@@ -145,6 +155,9 @@ public class TcgLockedPlugin extends Plugin
 
 	@Inject
 	private TcgCardCatalog cardCatalog;
+
+	@Inject
+	private TcgGroupCollectionClient groupCollectionClient;
 
 	@Inject
 	private TcgLockedPoolConsent poolConsent;
@@ -197,6 +210,12 @@ public class TcgLockedPlugin extends Plugin
 
 	/** Ticks until the next osrs-tcg API query; -1 once answered (pushes take over). */
 	private int apiQueryTicks = -1;
+	private int groupMetaTicks = -1;
+	private int groupSyncGeneration;
+	private okhttp3.Call groupRequest;
+	private String activeTcgGroupKey;
+	private int tcgGroupRevision = -1;
+	private Set<String> tcgGroupOwnedKeys = Collections.emptySet();
 
 	/**
 	 * Whether this session has said in chat that no collection arrived, and that one did. Suspended
@@ -402,6 +421,7 @@ public class TcgLockedPlugin extends Plugin
 		lastBroadcastOwned = Collections.emptySet();
 		lastBroadcastAudience = Collections.emptySet();
 		partyIdentityRefreshTicks = 0;
+		resetGroupSync();
 		// Withdraw the pooled cards from Bronzeman TCG: with this plugin off, the group's unlocks
 		// should stop applying there too rather than linger for the rest of the session.
 		shareUnlocksWithBronzeman();
@@ -489,10 +509,12 @@ public class TcgLockedPlugin extends Plugin
 					lastBroadcast = null;
 					lastBroadcastOwned = Collections.emptySet();
 					lastBroadcastAudience = Collections.emptySet();
+					groupMetaTicks = activeTcgGroupKey == null ? -1 : 0;
 				}
 				else
 				{
 					withdrawFromApprovedMembers();
+					cancelGroupRequest();
 				}
 				markSharedCatalogDirty();
 			}
@@ -512,6 +534,11 @@ public class TcgLockedPlugin extends Plugin
 			queryTcgApi();
 			// EventBus.post is synchronous, so an answered query flips hasCollection before this line.
 			apiQueryTicks = collectionReader.hasCollection() ? -1 : API_QUERY_RETRY_TICKS;
+		}
+		if (config.partyShare() && activeTcgGroupKey != null && groupRequest == null
+			&& groupMetaTicks >= 0 && --groupMetaTicks < 0)
+		{
+			fetchGroupMeta();
 		}
 		if (unlockQuietTicks >= 0 && --unlockQuietTicks < 0)
 		{
@@ -556,8 +583,15 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return;
 		}
+		if (!collectionReader.onApiGroupKey(data.containsKey(TCG_API_GROUP_KEY), data.get(TCG_API_GROUP_KEY)))
+		{
+			log.debug("TCG Locked: ignored malformed OSRS TCG group key.");
+			return;
+		}
 		boolean firstPayload = !collectionReader.hasCollection();
-		if (!collectionReader.onApiOwnedNames((List<?>) names))
+		Object itemIds = data.get(TCG_API_ITEM_IDS_KEY);
+		Object npcIds = data.get(TCG_API_NPC_IDS_KEY);
+		if (!collectionReader.onApiSnapshot((List<?>) names, itemIds, npcIds))
 		{
 			log.debug("TCG Locked: ignored malformed owned-names payload.");
 			return;
@@ -576,6 +610,8 @@ public class TcgLockedPlugin extends Plugin
 		// re-baseline silently (the cross-profile delta is not "unlocks"), and re-query.
 		withdrawFromApprovedMembers();
 		collectionReader.invalidate();
+		resetGroupSync();
+		markSharedCatalogDirty();
 		poolConsent.invalidate();
 		pooledKeys.clear();
 		offeredKeys.clear();
@@ -601,8 +637,9 @@ public class TcgLockedPlugin extends Plugin
 		lockbookDirty = true;
 		markSharedCatalogDirty();
 		baselineEstablished = false;
-		queryTcgApi();
-		apiQueryTicks = collectionReader.hasCollection() ? -1 : 0;
+		// OSRS TCG loads the new profile from its subscriber to this same event. Query next tick so
+		// subscriber registration order can never return the previous profile's collection.
+		apiQueryTicks = 0;
 		scheduleRefresh();
 	}
 
@@ -630,17 +667,13 @@ public class TcgLockedPlugin extends Plugin
 		String packed = message.getPackedOwnedKeys();
 		if (packed != null && packed.length() <= MAX_PARTY_PACKED_LENGTH)
 		{
-			sent = cardCatalog.unpackKeysOrNull(packed);
-			if (sent == null && message.getOwnedKeys() != null)
-			{
-				// Retain interoperability when a mixed-version party cannot decode the bitmap.
-				sent = cardCatalog.filterKnownKeys(message.getOwnedKeys());
-			}
+			// Released clients can have v1 names that their v2 bitmap could not represent.
+			sent = cardCatalog.mergePackedAndRawKeys(packed, message.getOwnedKeys());
 		}
 		else if (packed == null && message.getOwnedKeys() != null)
 		{
 			// Compatibility with clients released before packed party collections.
-			sent = cardCatalog.filterKnownKeys(message.getOwnedKeys());
+			sent = cardCatalog.mergePackedAndRawKeys(null, message.getOwnedKeys());
 		}
 		PartyMember from = partyService.getMemberById(message.getMemberId());
 		String partnerKey = from == null ? "" : rememberMemberKey(from);
@@ -798,7 +831,7 @@ public class TcgLockedPlugin extends Plugin
 		{
 			message.setPackedOwnedKeys(cardCatalog.packKeys(ownedNormalized));
 			// Keep interoperability with the currently released pre-bitmap client during rollout.
-			message.setOwnedKeys(ownedNormalized);
+			message.setOwnedKeys(cardCatalog.filterLegacyKeys(ownedNormalized));
 		}
 		lastBroadcastOwned = Collections.unmodifiableSet(new HashSet<>(ownedNormalized));
 		lastBroadcastAudience = Collections.unmodifiableSet(new HashSet<>(audience));
@@ -837,7 +870,7 @@ public class TcgLockedPlugin extends Plugin
 		{
 			MenuEntry entry = event.getMenuEntry();
 			NPC npc = entry.getNpc();
-			if (npc != null && npc.getName() != null && !isNpcUnlocked(npc.getName()))
+			if (npc != null && npc.getName() != null && !isNpcUnlocked(npc.getId(), npc.getName()))
 			{
 				removeMenuEntry(entry);
 				return;
@@ -906,7 +939,8 @@ public class TcgLockedPlugin extends Plugin
 			NPC npc = event.getMenuEntry().getNpc();
 			String npcName = npc != null && npc.getName() != null
 				? npc.getName() : stripNpcTarget(event.getMenuTarget());
-			if (!npcName.isEmpty() && !isNpcUnlocked(npcName))
+			int npcId = npc == null ? -1 : npc.getId();
+			if (!npcName.isEmpty() && !isNpcUnlocked(npcId, npcName))
 			{
 				if (block)
 				{
@@ -1079,6 +1113,7 @@ public class TcgLockedPlugin extends Plugin
 		invokeLaterIfStarted(() ->
 		{
 			forceQueryTcgApi();
+			groupMetaTicks = activeTcgGroupKey == null ? -1 : 0;
 			refreshOwned();
 		});
 	}
@@ -1105,6 +1140,10 @@ public class TcgLockedPlugin extends Plugin
 			{
 				owners.put(entry.getKey(), entry.getValue() == null
 					? Collections.emptySet() : new HashSet<>(entry.getValue()));
+			}
+			if (!tcgGroupOwnedKeys.isEmpty())
+			{
+				owners.put(TCG_GROUP_LABEL, new HashSet<>(tcgGroupOwnedKeys));
 			}
 		}
 		sharedCatalogSnapshot = new TcgSharedCatalogSnapshot(owners);
@@ -1134,7 +1173,9 @@ public class TcgLockedPlugin extends Plugin
 			loadSeenItems();
 			poolConsent.load(profileKey);
 			loadPooledPartners();
+			loadTcgGroupCache();
 		}
+		syncTcgGroupKey();
 
 		Set<String> snapshot = collectionReader.snapshotOrNull();
 		final boolean collectionKnown = snapshot != null;
@@ -1329,6 +1370,10 @@ public class TcgLockedPlugin extends Plugin
 				pooledCardKeys.addAll(keys);
 			}
 		}
+		if (config.partyShare())
+		{
+			pooledCardKeys.addAll(tcgGroupOwnedKeys);
+		}
 
 		TcgLockedStatus status = new TcgLockedStatus(
 			isCollectionLoaded(), ownedLower.size(), sessionUnlocks, enforcementLabel(),
@@ -1463,6 +1508,12 @@ public class TcgLockedPlugin extends Plugin
 			out.add(new TcgLockedStatus.PartyEntry(partnerKey, -1, -1, -1, false,
 				TcgLockedPoolConsent.Decision.APPROVED, false, true,
 				sharedCardCount(partnerKey), contributions.getOrDefault(partnerKey, 0)));
+		}
+		if (activeTcgGroupKey != null)
+		{
+			out.add(new TcgLockedStatus.PartyEntry(TCG_GROUP_LABEL, tcgGroupOwnedKeys.size(), -1, -1,
+				false, TcgLockedPoolConsent.Decision.APPROVED, true, false,
+				tcgGroupOwnedKeys.size(), contributions.getOrDefault(TCG_GROUP_LABEL, 0)));
 		}
 		return out;
 	}
@@ -1868,13 +1919,18 @@ public class TcgLockedPlugin extends Plugin
 			return TcgLockedStatus.UnlockSource.SUSPENDED;
 		}
 		int canonical = itemManager.canonicalize(itemId);
+		boolean hasItemIds = collectionReader.hasItemIds();
+		if (hasItemIds && (collectionReader.ownsItemId(itemId) || collectionReader.ownsItemId(canonical)))
+		{
+			return TcgLockedStatus.UnlockSource.OWNED;
+		}
 		String name = itemName(canonical);
 		if (name.isEmpty())
 		{
 			// Unknown item name: don't lock the player out of something we can't identify.
 			return TcgLockedStatus.UnlockSource.UNCARDED;
 		}
-		if (ownedLower.contains(name.toLowerCase(Locale.ROOT)))
+		if (!hasItemIds && ownedLower.contains(name.toLowerCase(Locale.ROOT)))
 		{
 			return TcgLockedStatus.UnlockSource.OWNED;
 		}
@@ -1883,7 +1939,7 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return TcgLockedStatus.UnlockSource.UNCARDED;
 		}
-		if (ownedNormalized.contains(key))
+		if (!hasItemIds && ownedNormalized.contains(key))
 		{
 			return TcgLockedStatus.UnlockSource.OWNED;
 		}
@@ -1903,7 +1959,10 @@ public class TcgLockedPlugin extends Plugin
 		// uses. Locking it would be permanent: there would be nothing the player could ever collect
 		// to open it up. If normalization failed to match a card that does exist we land here too,
 		// which errs towards letting the item through rather than towards a dead end.
-		return cardCatalog.hasItemCard(key)
+		boolean carded = hasItemIds
+			? cardCatalog.hasItemCard(itemId) || cardCatalog.hasItemCard(canonical)
+			: cardCatalog.hasItemCard(key);
+		return carded
 			? TcgLockedStatus.UnlockSource.LOCKED : TcgLockedStatus.UnlockSource.UNCARDED;
 	}
 
@@ -1930,6 +1989,10 @@ public class TcgLockedPlugin extends Plugin
 				names.add(entry.getKey());
 			}
 		}
+		if (tcgGroupOwnedKeys.contains(key))
+		{
+			names.add(TCG_GROUP_LABEL);
+		}
 		return names;
 	}
 
@@ -1937,8 +2000,8 @@ public class TcgLockedPlugin extends Plugin
 	 * Offers the pooled cards to Bronzeman TCG, which enforces the same locks from its own copy of
 	 * the collection. Without this, pooled unlocks do nothing whenever that plugin is running: it
 	 * blocks the item regardless of what we decide, so group play quietly stops working. Only cards
-	 * from partners the player approved are sent, and only the pooled extras — their own collection
-	 * it already has.
+	 * from approved RuneLite-party partners and the player's OSRS TCG group are sent, and only the
+	 * pooled extras — their own collection it already has.
 	 */
 	private void shareUnlocksWithBronzeman()
 	{
@@ -1952,6 +2015,7 @@ public class TcgLockedPlugin extends Plugin
 					pooled.addAll(keys);
 				}
 			}
+			pooled.addAll(tcgGroupOwnedKeys);
 		}
 		if (pooled.equals(lastSharedWithBronzeman))
 		{
@@ -1967,10 +2031,7 @@ public class TcgLockedPlugin extends Plugin
 	}
 
 	/**
-	 * @return true if a player you have approved owns a card for this key (pooled unlocks). The
-	 * party is only how collections are exchanged, not how long they last: an approved partner's
-	 * cards keep applying after you leave, and are refreshed the next time you are in a party
-	 * together.
+	 * @return true if an approved RuneLite-party partner or OSRS TCG group owns this card key.
 	 */
 	private boolean unlockedByParty(String key)
 	{
@@ -1985,7 +2046,7 @@ public class TcgLockedPlugin extends Plugin
 				return true;
 			}
 		}
-		return false;
+		return tcgGroupOwnedKeys.contains(key);
 	}
 
 	/**
@@ -2286,6 +2347,208 @@ public class TcgLockedPlugin extends Plugin
 		return names;
 	}
 
+	private void syncTcgGroupKey()
+	{
+		if (!collectionReader.isGroupKeyKnown())
+		{
+			return;
+		}
+		String next = collectionReader.groupKeyOrNull();
+		if (Objects.equals(activeTcgGroupKey, next))
+		{
+			if (next != null && config.partyShare() && groupRequest == null && groupMetaTicks < 0)
+			{
+				groupMetaTicks = 0;
+			}
+			return;
+		}
+
+		cancelGroupRequest();
+		activeTcgGroupKey = next;
+		tcgGroupRevision = -1;
+		tcgGroupOwnedKeys = Collections.emptySet();
+		clearTcgGroupCache();
+		lockbookDirty = true;
+		markSharedCatalogDirty();
+		lastSharedWithBronzeman = null;
+		groupMetaTicks = next != null && config.partyShare() ? 0 : -1;
+	}
+
+	private void loadTcgGroupCache()
+	{
+		resetGroupSync();
+		String groupKey = TcgGroupCollectionClient.normalizeGroupKey(
+			configManager.getRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_CACHE_KEY));
+		String revisionText = configManager.getRSProfileConfiguration(
+			TcgLockedConfig.GROUP, TCG_GROUP_CACHE_REVISION);
+		String packed = configManager.getRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_CACHE_CARDS);
+		if (groupKey == null || revisionText == null || packed == null)
+		{
+			return;
+		}
+		try
+		{
+			int revision = Integer.parseInt(revisionText);
+			Set<String> keys = cardCatalog.unpackKeysOrNull(packed);
+			if (revision < 0 || keys == null)
+			{
+				return;
+			}
+			activeTcgGroupKey = groupKey;
+			tcgGroupRevision = revision;
+			tcgGroupOwnedKeys = keys;
+			groupMetaTicks = config.partyShare() ? 0 : -1;
+			markSharedCatalogDirty();
+		}
+		catch (NumberFormatException ex)
+		{
+			log.debug("TCG Locked: ignored malformed cached OSRS TCG group revision.");
+		}
+	}
+
+	private void persistTcgGroupCache()
+	{
+		if (activeTcgGroupKey == null || tcgGroupRevision < 0)
+		{
+			return;
+		}
+		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_CACHE_REVISION);
+		configManager.setRSProfileConfiguration(
+			TcgLockedConfig.GROUP, TCG_GROUP_CACHE_KEY, activeTcgGroupKey);
+		configManager.setRSProfileConfiguration(
+			TcgLockedConfig.GROUP, TCG_GROUP_CACHE_CARDS, cardCatalog.packKeys(tcgGroupOwnedKeys));
+		// Revision is written last and acts as the commit marker for the key + collection pair.
+		configManager.setRSProfileConfiguration(
+			TcgLockedConfig.GROUP, TCG_GROUP_CACHE_REVISION, Integer.toString(tcgGroupRevision));
+	}
+
+	private void clearTcgGroupCache()
+	{
+		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_CACHE_KEY);
+		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_CACHE_CARDS);
+		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_CACHE_REVISION);
+	}
+
+	private void fetchGroupMeta()
+	{
+		if (!started || !config.partyShare() || activeTcgGroupKey == null || groupRequest != null)
+		{
+			return;
+		}
+		final int lifecycle = lifecycleGeneration;
+		final int sync = groupSyncGeneration;
+		final String groupKey = activeTcgGroupKey;
+		groupMetaTicks = GROUP_META_REFRESH_TICKS;
+		groupRequest = groupCollectionClient.fetchMeta(groupKey,
+			new TcgGroupCollectionClient.ResultCallback<TcgGroupCollectionClient.Meta>()
+			{
+				@Override
+				public void onSuccess(TcgGroupCollectionClient.Meta meta)
+				{
+					clientThread.invokeLater(() -> handleGroupMeta(lifecycle, sync, groupKey, meta));
+				}
+
+				@Override
+				public void onFailure()
+				{
+					clientThread.invokeLater(() -> finishGroupFailure(lifecycle, sync, groupKey));
+				}
+			});
+	}
+
+	private void handleGroupMeta(int lifecycle, int sync, String groupKey, TcgGroupCollectionClient.Meta meta)
+	{
+		if (!validGroupCallback(lifecycle, sync, groupKey))
+		{
+			return;
+		}
+		groupRequest = null;
+		groupMetaTicks = GROUP_META_REFRESH_TICKS;
+		if (meta.revision == tcgGroupRevision)
+		{
+			return;
+		}
+		final int expectedRevision = meta.revision;
+		groupRequest = groupCollectionClient.fetchCollection(groupKey,
+			new TcgGroupCollectionClient.ResultCallback<TcgGroupCollectionClient.GroupCollection>()
+			{
+				@Override
+				public void onSuccess(TcgGroupCollectionClient.GroupCollection collection)
+				{
+					clientThread.invokeLater(() -> applyGroupCollection(
+						lifecycle, sync, groupKey, expectedRevision, collection));
+				}
+
+				@Override
+				public void onFailure()
+				{
+					clientThread.invokeLater(() -> finishGroupFailure(lifecycle, sync, groupKey));
+				}
+			});
+	}
+
+	private void applyGroupCollection(int lifecycle, int sync, String groupKey, int expectedRevision,
+		TcgGroupCollectionClient.GroupCollection collection)
+	{
+		if (!validGroupCallback(lifecycle, sync, groupKey))
+		{
+			return;
+		}
+		groupRequest = null;
+		groupMetaTicks = GROUP_META_REFRESH_TICKS;
+		if (collection.revision != expectedRevision)
+		{
+			return;
+		}
+		Set<String> known = cardCatalog.allCardKeys();
+		known.retainAll(collection.cardKeys);
+		tcgGroupOwnedKeys = Collections.unmodifiableSet(known);
+		tcgGroupRevision = collection.revision;
+		persistTcgGroupCache();
+		lockbookDirty = true;
+		markSharedCatalogDirty();
+		lastSharedWithBronzeman = null;
+		refreshOwned();
+	}
+
+	private void finishGroupFailure(int lifecycle, int sync, String groupKey)
+	{
+		if (!validGroupCallback(lifecycle, sync, groupKey))
+		{
+			return;
+		}
+		groupRequest = null;
+		groupMetaTicks = GROUP_META_REFRESH_TICKS;
+	}
+
+	private boolean validGroupCallback(int lifecycle, int sync, String groupKey)
+	{
+		return started && config.partyShare() && lifecycleGeneration == lifecycle
+			&& groupSyncGeneration == sync && Objects.equals(activeTcgGroupKey, groupKey);
+	}
+
+	private void cancelGroupRequest()
+	{
+		groupSyncGeneration++;
+		if (groupRequest != null)
+		{
+			groupRequest.cancel();
+			groupRequest = null;
+		}
+		groupMetaTicks = -1;
+	}
+
+	private void resetGroupSync()
+	{
+		cancelGroupRequest();
+		activeTcgGroupKey = null;
+		tcgGroupRevision = -1;
+		tcgGroupOwnedKeys = Collections.emptySet();
+		lockbookDirty = true;
+		sharedCatalogDirty = true;
+		lastSharedWithBronzeman = null;
+	}
+
 	private static String pooledConfigKey(String partnerKey)
 	{
 		return POOLED_PREFIX + partnerKey.replace(' ', '_');
@@ -2301,7 +2564,7 @@ public class TcgLockedPlugin extends Plugin
 	 * @return true if the monster may be interacted with: the collection isn't known yet, no card
 	 * exists for it, or one of its cards is owned. Mirrors {@link #isUnlocked(int)} for NPC names.
 	 */
-	private boolean isNpcUnlocked(String npcName)
+	private boolean isNpcUnlocked(int npcId, String npcName)
 	{
 		if (!collectionReader.hasCollection())
 		{
@@ -2313,21 +2576,22 @@ public class TcgLockedPlugin extends Plugin
 			return true;
 		}
 		Set<String> cards = cardCatalog.npcCards(key);
-		if (cards.isEmpty())
+		boolean hasNpcIds = npcId >= 0 && collectionReader.hasNpcIds();
+		if (hasNpcIds && collectionReader.ownsNpcId(npcId))
 		{
-			// No card exists for this NPC (or unparseable name): always free.
 			return true;
 		}
 		// Several cards can share one in-game name (an "Archer" is carded per location); any of them
 		// unlocks it, and the card's own name is what the collection is keyed by, not the NPC's.
 		for (String card : cards)
 		{
-			if (ownedNormalized.contains(card) || extraAllowNormalized.contains(card) || unlockedByParty(card))
+			if ((!hasNpcIds && ownedNormalized.contains(card))
+				|| extraAllowNormalized.contains(card) || unlockedByParty(card))
 			{
 				return true;
 			}
 		}
-		return false;
+		return hasNpcIds ? !cardCatalog.hasNpcCard(npcId) : cards.isEmpty();
 	}
 
 	/** Strips colour tags and a trailing "(level-N)" from an NPC menu target to recover the plain name. */

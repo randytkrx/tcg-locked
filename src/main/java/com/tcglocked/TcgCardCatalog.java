@@ -61,23 +61,32 @@ class TcgCardCatalog
 {
 	private static final String ITEM_RESOURCE = "item-cards.txt";
 	private static final String NPC_RESOURCE = "npc-cards.txt";
+	private static final String ITEM_ID_RESOURCE = "item-card-ids.txt";
+	private static final String NPC_ID_RESOURCE = "npc-card-ids.txt";
+	private static final String LEGACY_V2_RESOURCE = "legacy-v2-card-keys.txt";
 
 	/** Leading tag on a packed collection: a raw bitmap, or one that was worth deflating. */
 	private static final char PACKED_RAW = 'b';
 	private static final char PACKED_DEFLATED = 'z';
-	private static final String PACKED_VERSION = "2";
+	private static final String PACKED_VERSION = "3";
+	private static final String LEGACY_PACKED_VERSION = "2";
 	private static final int MAX_PACKED_LENGTH = 16_384;
 
 	/** Every card key in a stable order, so a packed bitmap means the same thing on both sides. */
 	private List<String> indexedKeys = Collections.emptyList();
 	private Map<String, Integer> keyIndex = Collections.emptyMap();
 	private String catalogHash = "";
+	private List<String> legacyIndexedKeys = Collections.emptyList();
+	private Set<String> legacyKeySet = Collections.emptySet();
+	private String legacyCatalogHash = "";
 
 	/** Normalized names of every item that has a card. */
 	private Set<String> itemCardKeys = Collections.emptySet();
+	private Set<Integer> itemCardIds = Collections.emptySet();
 
 	/** Normalized in-game NPC name to the normalized card names that unlock it (any one suffices). */
 	private Map<String, Set<String>> npcCardKeys = Collections.emptyMap();
+	private Set<Integer> npcCardIds = Collections.emptySet();
 
 	@Inject
 	TcgCardCatalog()
@@ -92,6 +101,18 @@ class TcgCardCatalog
 	boolean hasItemCard(String normalizedItemKey)
 	{
 		return normalizedItemKey != null && itemCardKeys.contains(normalizedItemKey);
+	}
+
+	/** @return true if this current game item ID belongs to a card or one of its variants. */
+	boolean hasItemCard(int itemId)
+	{
+		return itemCardIds.contains(itemId);
+	}
+
+	/** @return true if this current game NPC ID belongs to a card or one of its variants. */
+	boolean hasNpcCard(int npcId)
+	{
+		return npcCardIds.contains(npcId);
 	}
 
 	/**
@@ -218,10 +239,22 @@ class TcgCardCatalog
 		try
 		{
 			String[] header = packed.split(":", 3);
-			if (header.length != 3 || !PACKED_VERSION.equals(header[0]) || !catalogHash.equals(header[1])
-				|| header[2].length() < 2)
+			if (header.length != 3 || header[2].length() < 2)
 			{
 				throw new IllegalArgumentException("Unknown packed collection format");
+			}
+			List<String> packedIndex;
+			if (PACKED_VERSION.equals(header[0]) && catalogHash.equals(header[1]))
+			{
+				packedIndex = indexedKeys;
+			}
+			else if (LEGACY_PACKED_VERSION.equals(header[0]) && legacyCatalogHash.equals(header[1]))
+			{
+				packedIndex = legacyIndexedKeys;
+			}
+			else
+			{
+				throw new IllegalArgumentException("Unknown packed collection catalog");
 			}
 			char form = header[2].charAt(0);
 			if (form != PACKED_RAW && form != PACKED_DEFLATED)
@@ -229,19 +262,19 @@ class TcgCardCatalog
 				throw new IllegalArgumentException("Unknown packed collection encoding");
 			}
 			byte[] stored = Base64.getDecoder().decode(header[2].substring(1));
-			int byteLength = (indexedKeys.size() + 7) / 8;
+			int byteLength = (packedIndex.size() + 7) / 8;
 			byte[] bits = form == PACKED_DEFLATED ? inflate(stored, byteLength) : stored;
 			if (bits.length != byteLength)
 			{
 				throw new IllegalArgumentException("Unexpected packed collection length");
 			}
 			Set<String> keys = new HashSet<>();
-			int limit = Math.min(indexedKeys.size(), bits.length * 8);
+			int limit = Math.min(packedIndex.size(), bits.length * 8);
 			for (int i = 0; i < limit; i++)
 			{
 				if ((bits[i >> 3] & (1 << (i & 7))) != 0)
 				{
-					keys.add(indexedKeys.get(i));
+					keys.add(packedIndex.get(i));
 				}
 			}
 			return Collections.unmodifiableSet(keys);
@@ -273,6 +306,36 @@ class TcgCardCatalog
 		return Collections.unmodifiableSet(filtered);
 	}
 
+	/** Drops v3-only keys from the name-array fallback sent to clients that only know v2 names. */
+	Set<String> filterLegacyKeys(Set<String> keys)
+	{
+		if (keys == null)
+		{
+			return Collections.emptySet();
+		}
+		Set<String> filtered = new HashSet<>(keys);
+		filtered.retainAll(legacyKeySet);
+		return Collections.unmodifiableSet(filtered);
+	}
+
+	/** Decodes a bitmap and merges the raw-name fallback used during mixed-version rollout. */
+	Set<String> mergePackedAndRawKeys(String packed, Set<String> rawKeys)
+	{
+		Set<String> packedKeys = packed == null ? null : unpackKeysOrNull(packed);
+		Set<String> knownRaw = rawKeys == null ? null : filterKnownKeys(rawKeys);
+		if (packedKeys == null)
+		{
+			return knownRaw;
+		}
+		if (knownRaw == null || knownRaw.isEmpty())
+		{
+			return packedKeys;
+		}
+		Set<String> merged = new HashSet<>(packedKeys);
+		merged.addAll(knownRaw);
+		return Collections.unmodifiableSet(merged);
+	}
+
 	/** @return every card key the catalog knows, in index order. */
 	Set<String> allCardKeys()
 	{
@@ -291,8 +354,20 @@ class TcgCardCatalog
 		return npcCardKeys.size();
 	}
 
+	int itemIdCount()
+	{
+		return itemCardIds.size();
+	}
+
+	int npcIdCount()
+	{
+		return npcCardIds.size();
+	}
+
 	private void load()
 	{
+		Set<Integer> itemIds = loadIds(ITEM_ID_RESOURCE);
+		Set<Integer> npcIds = loadIds(NPC_ID_RESOURCE);
 		Set<String> items = new HashSet<>();
 		forEachLine(ITEM_RESOURCE, line ->
 		{
@@ -332,7 +407,15 @@ class TcgCardCatalog
 		npcs.replaceAll((entity, cards) -> Collections.unmodifiableSet(cards));
 
 		itemCardKeys = Collections.unmodifiableSet(items);
+		itemCardIds = Collections.unmodifiableSet(itemIds);
 		npcCardKeys = Collections.unmodifiableMap(npcs);
+		npcCardIds = Collections.unmodifiableSet(npcIds);
+
+		List<String> legacy = new ArrayList<>();
+		forEachLine(LEGACY_V2_RESOURCE, legacy::add);
+		legacyIndexedKeys = Collections.unmodifiableList(legacy);
+		legacyKeySet = Collections.unmodifiableSet(new HashSet<>(legacy));
+		legacyCatalogHash = hashCatalog(legacyIndexedKeys);
 
 		// Sorted so the bit for a given card is the same on every client and across restarts. Monster
 		// CARD names go in, not the in-game names they are keyed by, because the card name is what a
@@ -347,7 +430,15 @@ class TcgCardCatalog
 			index.put(indexedKeys.get(i), i);
 		}
 		keyIndex = Collections.unmodifiableMap(index);
-		log.debug("TCG Locked: card catalog loaded ({} item cards, {} monsters).", items.size(), npcs.size());
+		log.debug("TCG Locked: card catalog loaded ({} item names/{} IDs, {} NPC names/{} IDs).",
+			items.size(), itemIds.size(), npcs.size(), npcIds.size());
+	}
+
+	private Set<Integer> loadIds(String resource)
+	{
+		Set<Integer> ids = new HashSet<>();
+		forEachLine(resource, line -> ids.add(Integer.parseInt(line)));
+		return ids;
 	}
 
 	private static String hashCatalog(List<String> keys)

@@ -1,24 +1,7 @@
 /*
- * Regenerates the bundled card-catalog resources from OSRS TCG's own Card.json.
+ * Regenerates the bundled catalogs from OSRS TCG's v1 live catalog response.
  *
- * Usage: node scripts/generate-card-catalogs.js <path-to-osrs-tcg-Card.json>
- *
- * Card.json is the upstream OSRS TCG plugin's wiki-sourced card list
- * (src/main/resources/Card.json in https://github.com/Azderi/osrs-tcg). Every card carries a
- * "category" array; each card is exactly one of "Resource" (an item) or "Monster" (an NPC),
- * verified against the 2026-07 snapshot: 5149 Resource + 1227 Monster = 6376 cards, no card
- * in both categories and none in neither.
- *
- * Writes:
- *   src/main/resources/com/tcglocked/item-cards.txt  one card name per line
- *   src/main/resources/com/tcglocked/npc-cards.txt   in-game NPC name|card name[|card name...]
- *   src/main/resources/com/tcglocked/npc-card-images.tsv card name and OSRS TCG image URL
- *
- * Item card names carry no disambiguation suffixes (0 of 5149 contain a bracket), so the item
- * file is a flat list. Monster card names do: 67 of them end in a wiki qualifier the in-game NPC
- * name never contains ("Monkey (monster)", "Zombie (tier 1)", "Ferret (Hunter)"). Those are keyed
- * by the stripped name, and several distinct cards can collapse onto one NPC name, so the value is
- * a list: owning ANY listed card unlocks that NPC.
+ * Usage: node scripts/generate-card-catalogs.js <path-to-live-catalog.json>
  */
 'use strict';
 
@@ -28,108 +11,184 @@ const path = require('path');
 const source = process.argv[2];
 if (!source)
 {
-	console.error('usage: node scripts/generate-card-catalogs.js <path-to-Card.json>');
+	console.error('usage: node scripts/generate-card-catalogs.js <path-to-live-catalog.json>');
 	process.exit(1);
 }
 
 const repoRoot = path.resolve(__dirname, '..');
 const outDir = path.join(repoRoot, 'src', 'main', 'resources', 'com', 'tcglocked');
-
-const cards = JSON.parse(fs.readFileSync(source, 'utf8'));
-if (!Array.isArray(cards))
+const resource = name => path.join(outDir, name);
+const catalog = JSON.parse(fs.readFileSync(source, 'utf8'));
+if (!catalog || !Array.isArray(catalog.items) || !Array.isArray(catalog.npcs))
 {
-	console.error('expected Card.json to be an array of cards');
+	console.error('expected the live {items,npcs} catalog schema');
 	process.exit(1);
 }
 
-const hasCategory = (card, wanted) => Array.isArray(card.category)
-	&& card.category.some(entry => String(entry).toLowerCase() === wanted);
+const byName = (a, b) => a.localeCompare(b, 'en');
+const header = lines => lines.map(line => '# ' + line).join('\n') + '\n';
+const dataLines = name => fs.existsSync(resource(name))
+	? fs.readFileSync(resource(name), 'utf8').split(/\r?\n/)
+		.map(line => line.trim()).filter(line => line && !line.startsWith('#'))
+	: [];
 
-const cardName = card => typeof card.name === 'string' ? card.name.trim() : '';
-
-/** Drops a single trailing wiki qualifier: "Monkey (monster)" -> "Monkey". */
-const entityName = name => name.replace(/\s*\([^()]*\)\s*$/, '').trim();
-
-const itemNames = new Set();
-const npcEntities = new Map();
-const npcImageUrls = new Map();
-let skipped = 0;
-
-for (const card of cards)
+// This matches TcgItemNameNormalizer. The released v2 bitmap was indexed by this exact sorted set.
+const normalize = raw =>
 {
-	const name = cardName(card);
-	if (!name)
+	let value = String(raw || '').trim().toLowerCase()
+		.replace(/[’‘]/g, "'").replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+	let previous;
+	do
 	{
-		skipped++;
+		previous = value;
+		value = value.replace(/\(\d+\)\s*$/, '').trim()
+			.replace(/\((?:i|g|t|l|c|u|e|p|p\+|p\+\+|kp|or|cr|nz|bh|lms|deadman|uncharged|charged|empty|full|inactive|deployed|broken|damaged|locked|last man standing|historical|ornament|guthix|saradomin|zamorak|armadyl|bandos|ancient|rune|gilded|ruby|emerald|diamond|dragonstone|onyx|zenyte)\)\s*$/i, '').trim()
+			.replace(/\s+(?:0|25|50|75|100)$/, '').trim()
+			.replace(/\s+\d+%$/, '').trim();
+	}
+	while (value !== previous);
+	return value;
+};
+
+const legacyItems = dataLines('beta-item-cards.txt');
+const legacyNpcLines = dataLines('beta-npc-cards.txt');
+if (!legacyItems.length || !legacyNpcLines.length)
+{
+	console.error('missing frozen beta catalog compatibility resources');
+	process.exit(1);
+}
+const legacyIndexPath = resource('legacy-v2-card-keys.txt');
+if (!fs.existsSync(legacyIndexPath))
+{
+	const keys = new Set(legacyItems.map(normalize).filter(Boolean));
+	for (const line of legacyNpcLines)
+	{
+		const parts = line.split('|');
+		for (const name of parts.length === 1 ? parts : parts.slice(1))
+		{
+			const key = normalize(name);
+			if (key)
+			{
+				keys.add(key);
+			}
+		}
+	}
+	const sorted = [...keys].sort();
+	fs.writeFileSync(legacyIndexPath, header([
+		'Exact sorted normalized card-key index used by the released packed v2 catalog.',
+		'Compatibility resource: never regenerate from a newer catalog or edit by hand.',
+		sorted.length + ' keys.',
+	]) + sorted.join('\n') + '\n', 'utf8');
+}
+
+const itemNames = new Set(legacyItems);
+// Match v1's LiveCardsCatalogParser exactly: only an exact current parent-name collision gets an
+// npc:<id> storage identity. Normalized or legacy aliases must not create identities v1 never emits.
+const liveItemParentNames = new Set(catalog.items
+	.map(card => typeof card.name === 'string' ? card.name.trim() : '').filter(Boolean));
+const npcEntities = new Map();
+for (const line of legacyNpcLines)
+{
+	const parts = line.split('|');
+	const cards = npcEntities.get(parts[0]) || new Set();
+	(parts.length === 1 ? parts : parts.slice(1)).forEach(name => cards.add(name));
+	npcEntities.set(parts[0], cards);
+}
+
+const itemIds = new Set();
+const npcIds = new Set();
+const npcImages = new Map();
+const names = card => [card.name, card.parent && card.parent.name,
+	...((card.tcg && card.tcg.variants) || []).map(variant => variant.name)]
+	.filter(name => typeof name === 'string' && name.trim()).map(name => name.trim());
+const addIds = (card, ids) =>
+{
+	const parent = card.parent && typeof card.parent === 'object' ? card.parent.id : card.parent;
+	[card.id, parent, ...((card.tcg && card.tcg.variants) || []).map(variant => variant.id)]
+		.filter(Number.isInteger).forEach(id => ids.add(id));
+};
+
+for (const card of catalog.items)
+{
+	names(card).forEach(name => itemNames.add(name));
+	addIds(card, itemIds);
+}
+
+const itemKeys = new Set([...itemNames].map(normalize));
+let collisionCount = 0;
+for (const card of catalog.npcs)
+{
+	const cardNames = names(card);
+	if (!cardNames.length || !Number.isInteger(card.id))
+	{
 		continue;
 	}
-	const isItem = hasCategory(card, 'resource');
-	const isMonster = hasCategory(card, 'monster');
-	if (isItem === isMonster)
+	addIds(card, npcIds);
+	const storageKey = liveItemParentNames.has(card.name.trim()) ? 'npc:' + card.id : card.name.trim();
+	if (storageKey.startsWith('npc:'))
 	{
-		// Neither category, or somehow both: we can't tell what it gates, so leave it out
-		// rather than guess. Loudly reported below so a schema change can't slip through.
-		skipped++;
-		continue;
+		collisionCount++;
 	}
-	if (isItem)
+	for (const entity of cardNames)
 	{
-		itemNames.add(name);
-		continue;
+		const cards = npcEntities.get(entity) || new Set();
+		cards.add(storageKey);
+		npcEntities.set(entity, cards);
 	}
-	const entity = entityName(name);
-	if (!entity)
+	if (typeof card.imagePath === 'string' && card.imagePath.trim())
 	{
-		skipped++;
-		continue;
-	}
-	if (!npcEntities.has(entity))
-	{
-		npcEntities.set(entity, new Set());
-	}
-	npcEntities.get(entity).add(name);
-	if (typeof card.imageUrl === 'string' && card.imageUrl.trim())
-	{
-		npcImageUrls.set(name, card.imageUrl.trim());
+		const image = new URL(card.imagePath.trim(), 'https://osrs-tcg.net').toString();
+		npcImages.set(card.name.trim(), image);
 	}
 }
 
-const byName = (a, b) => a.localeCompare(b, 'en');
-
-const header = lines => lines.map(line => '# ' + line).join('\n') + '\n';
-
 const itemLines = [...itemNames].sort(byName);
-fs.writeFileSync(path.join(outDir, 'item-cards.txt'), header([
-	'Item ("Resource") card names from OSRS TCG\'s Card.json. One card name per line.',
-	'Items with no card here are not part of the challenge and are never locked.',
+fs.writeFileSync(resource('item-cards.txt'), header([
+	'Current OSRS TCG item names plus legacy beta names for name fallback.',
 	'Generated by scripts/generate-card-catalogs.js - do not edit by hand.',
-	itemLines.length + ' cards.',
+	itemLines.length + ' names.',
 ]) + itemLines.join('\n') + '\n', 'utf8');
 
 const npcLines = [...npcEntities.keys()].sort(byName)
 	.map(entity => [entity, ...[...npcEntities.get(entity)].sort(byName)].join('|'));
-fs.writeFileSync(path.join(outDir, 'npc-cards.txt'), header([
-	'Monster card names from OSRS TCG\'s Card.json, keyed by the in-game NPC name.',
-	'Format: NPC name|card name[|card name...] - owning any listed card unlocks that NPC.',
+const npcCardKeys = new Set([...npcEntities.values()].flatMap(set => [...set].map(normalize)));
+fs.writeFileSync(resource('npc-cards.txt'), header([
+	'Current OSRS TCG NPC names plus legacy beta mappings for name fallback.',
+	'Format: NPC name|storage key[|storage key...] - owning any listed key unlocks that NPC.',
 	'Generated by scripts/generate-card-catalogs.js - do not edit by hand.',
-	npcEntities.size + ' NPCs from ' + [...npcEntities.values()]
-		.reduce((sum, set) => sum + set.size, 0) + ' cards.',
+	npcEntities.size + ' NPC names using ' + npcCardKeys.size + ' storage keys.',
 ]) + npcLines.join('\n') + '\n', 'utf8');
+
+const writeIds = (name, label, ids) =>
+{
+	const sorted = [...ids].sort((a, b) => a - b);
+	fs.writeFileSync(resource(name), header([
+		'Current OSRS TCG ' + label + ' IDs (card, parent, and tcg.variants).',
+		'Generated by scripts/generate-card-catalogs.js - do not edit by hand.',
+		sorted.length + ' IDs.',
+	]) + sorted.join('\n') + '\n', 'utf8');
+};
+writeIds('item-card-ids.txt', 'item', itemIds);
+writeIds('npc-card-ids.txt', 'NPC', npcIds);
 
 const escapeTsv = value => String(value)
 	.replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\r/g, '\\r').replace(/\n/g, '\\n');
-const npcImageLines = [...npcImageUrls.entries()].sort(([a], [b]) => byName(a, b))
+const npcImageLines = [...npcImages.entries()].sort(([a], [b]) => byName(a, b))
 	.map(([name, url]) => escapeTsv(name) + '\t' + escapeTsv(url));
-fs.writeFileSync(path.join(outDir, 'npc-card-images.tsv'), header([
-	'NPC card image URLs from OSRS TCG Card.json.',
-	'TCG Locked shares OSRS TCG\'s persistent disk cache so each URL is downloaded at most once.',
+fs.writeFileSync(resource('npc-card-images.tsv'), header([
+	'Current NPC card image URLs derived from the v1 catalog imagePath.',
 	'Generated by scripts/generate-card-catalogs.js - do not edit by hand.',
 	npcImageLines.length + ' cards.',
 ]) + npcImageLines.join('\n') + '\n', 'utf8');
 
-const collapsed = [...npcEntities.values()].filter(set => set.size > 1).length;
-console.log('cards read:        ' + cards.length);
-console.log('item cards:        ' + itemNames.size);
-console.log('npc cards:         ' + [...npcEntities.values()].reduce((s, set) => s + set.size, 0));
-console.log('npc entities:      ' + npcEntities.size + ' (' + collapsed + ' with multiple cards)');
-console.log('skipped:           ' + skipped);
+console.log('live item cards:    ' + catalog.items.length);
+console.log('live NPC cards:     ' + catalog.npcs.length);
+console.log('item names:         ' + itemNames.size);
+console.log('NPC names:          ' + npcEntities.size);
+console.log('normalized items:   ' + itemKeys.size);
+console.log('NPC storage keys:   ' + npcCardKeys.size);
+console.log('v3 packed keys:     ' + new Set([...itemKeys, ...npcCardKeys]).size);
+console.log('item IDs:           ' + itemIds.size);
+console.log('NPC IDs:            ' + npcIds.size);
+console.log('NPC collisions:     ' + collisionCount);
+console.log('legacy v2 keys:     ' + dataLines('legacy-v2-card-keys.txt').length);

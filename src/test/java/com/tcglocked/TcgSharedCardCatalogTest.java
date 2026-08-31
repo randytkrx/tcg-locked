@@ -22,10 +22,10 @@ public class TcgSharedCardCatalogTest
 	@Test
 	public void bundledCatalogUsesExistingLocalCardResources()
 	{
-		assertEquals(6376, catalog.cards().size());
-		assertEquals(5149, catalog.cards().stream()
+		assertEquals(7603, catalog.cards().size());
+		assertEquals(6049, catalog.cards().stream()
 			.filter(card -> card.category == TcgSharedCardCatalog.Category.ITEM).count());
-		assertEquals(1227, catalog.cards().stream()
+		assertEquals(1554, catalog.cards().stream()
 			.filter(card -> card.category == TcgSharedCardCatalog.Category.NPC).count());
 		assertCard("Abyssal whip", "abyssal whip", TcgSharedCardCatalog.Category.ITEM);
 		assertCard("Abyssal demon", "abyssal demon", TcgSharedCardCatalog.Category.NPC);
@@ -37,7 +37,8 @@ public class TcgSharedCardCatalogTest
 		TcgSharedCardCatalog.Card item = card("Abyssal whip");
 		TcgSharedCardCatalog.Card npc = card("Abyssal demon");
 		assertEquals(null, item.imageUrl);
-		assertTrue(npc.imageUrl.startsWith("https://oldschool.runescape.wiki/images/"));
+		assertTrue(npc.imageUrl.startsWith("https://osrs-tcg.net/images/npcs/detail/"));
+		assertTrue(npc.legacyImageUrl.startsWith("https://oldschool.runescape.wiki/"));
 	}
 
 	@Test

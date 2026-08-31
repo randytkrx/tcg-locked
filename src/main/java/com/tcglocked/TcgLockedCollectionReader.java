@@ -38,6 +38,11 @@ class TcgLockedCollectionReader
 {
 	/** Null until the first payload lands; non-null (possibly empty) means the collection is known. */
 	private Set<String> ownedLower;
+	/** Null when talking to the beta name-only API; otherwise the complete owned v1 ID sets. */
+	private Set<Integer> ownedItemIds;
+	private Set<Integer> ownedNpcIds;
+	private boolean groupKeyKnown;
+	private String groupKey;
 
 	/**
 	 * Feed in an {@code ownedNames} payload from the TCG plugin's API. Elements are validated
@@ -46,11 +51,17 @@ class TcgLockedCollectionReader
 	 */
 	synchronized boolean onApiOwnedNames(List<?> names)
 	{
+		return onApiSnapshot(names, null, null);
+	}
+
+	/** Applies one complete API payload, retaining beta compatibility when the ID fields are absent. */
+	synchronized boolean onApiSnapshot(List<?> names, Object itemIds, Object npcIds)
+	{
 		if (names == null)
 		{
 			return false;
 		}
-		Set<String> normalized = new HashSet<>();
+		Set<String> normalizedNames = new HashSet<>();
 		for (Object name : names)
 		{
 			if (!(name instanceof String))
@@ -62,10 +73,73 @@ class TcgLockedCollectionReader
 			{
 				return false;
 			}
-			normalized.add(trimmed.toLowerCase(Locale.ROOT));
+			normalizedNames.add(trimmed.toLowerCase(Locale.ROOT));
 		}
-		ownedLower = Collections.unmodifiableSet(normalized);
+		Set<Integer> normalizedItemIds = normalizeIds(itemIds);
+		Set<Integer> normalizedNpcIds = normalizeIds(npcIds);
+		if ((itemIds != null && normalizedItemIds == null) || (npcIds != null && normalizedNpcIds == null))
+		{
+			return false;
+		}
+		ownedLower = Collections.unmodifiableSet(normalizedNames);
+		ownedItemIds = normalizedItemIds;
+		ownedNpcIds = normalizedNpcIds;
 		return true;
+	}
+
+	/** Applies the optional v1 group identity; absence is distinct from an explicit null value. */
+	synchronized boolean onApiGroupKey(boolean present, Object rawGroupKey)
+	{
+		if (!present)
+		{
+			return true;
+		}
+		if (rawGroupKey == null)
+		{
+			groupKeyKnown = true;
+			groupKey = null;
+			return true;
+		}
+		if (!(rawGroupKey instanceof String))
+		{
+			return false;
+		}
+		String normalized = TcgGroupCollectionClient.normalizeGroupKey((String) rawGroupKey);
+		if (normalized == null)
+		{
+			return false;
+		}
+		groupKeyKnown = true;
+		groupKey = normalized;
+		return true;
+	}
+
+	private static Set<Integer> normalizeIds(Object raw)
+	{
+		if (raw == null)
+		{
+			return null;
+		}
+		if (!(raw instanceof List))
+		{
+			return null;
+		}
+		Set<Integer> ids = new HashSet<>();
+		for (Object value : (List<?>) raw)
+		{
+			if (!(value instanceof Number))
+			{
+				return null;
+			}
+			Number number = (Number) value;
+			long id = number.longValue();
+			if (id < 0 || id > Integer.MAX_VALUE || number.doubleValue() != (double) id)
+			{
+				return null;
+			}
+			ids.add((int) id);
+		}
+		return Collections.unmodifiableSet(ids);
 	}
 
 	/**
@@ -85,11 +159,45 @@ class TcgLockedCollectionReader
 	synchronized void invalidate()
 	{
 		ownedLower = null;
+		ownedItemIds = null;
+		ownedNpcIds = null;
+		groupKeyKnown = false;
+		groupKey = null;
 	}
 
 	/** @return one immutable atomic snapshot, or null while the collection is unknown. */
 	synchronized Set<String> snapshotOrNull()
 	{
 		return ownedLower;
+	}
+
+	synchronized boolean hasItemIds()
+	{
+		return ownedItemIds != null;
+	}
+
+	synchronized boolean ownsItemId(int itemId)
+	{
+		return ownedItemIds != null && ownedItemIds.contains(itemId);
+	}
+
+	synchronized boolean hasNpcIds()
+	{
+		return ownedNpcIds != null;
+	}
+
+	synchronized boolean ownsNpcId(int npcId)
+	{
+		return ownedNpcIds != null && ownedNpcIds.contains(npcId);
+	}
+
+	synchronized boolean isGroupKeyKnown()
+	{
+		return groupKeyKnown;
+	}
+
+	synchronized String groupKeyOrNull()
+	{
+		return groupKey;
 	}
 }
