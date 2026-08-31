@@ -25,6 +25,7 @@ import net.runelite.client.config.ConfigSection;
 public interface TcgLockedConfig extends Config
 {
 	String GROUP = "tcglocked";
+	String SYNC_GROUP_COLLECTION = "syncGroupCollection";
 
 	enum Enforcement
 	{
@@ -273,14 +274,42 @@ public interface TcgLockedConfig extends Config
 	@ConfigItem(
 		keyName = "partyShare",
 		name = "Pool group cards",
-		description = "Pool cards from your public OSRS TCG group, including offline members. RuneLite party "
-			+ "sharing and progress remain available for existing groups.",
+		description = "Pool cards with the people you play with. Sharing over a RuneLite party works on its own; "
+			+ "pooling from a public OSRS TCG group, including offline members, also needs \"Sync group from "
+			+ "osrs-tcg.net\" below.",
 		section = FEEDBACK,
 		position = 7
 	)
 	default boolean partyShare()
 	{
 		return true;
+	}
+
+	/**
+	 * The single switch for every request this plugin sends to a server of its own. It is off by
+	 * default and the warning lives here rather than in runelite-plugin.properties, so the Plugin Hub
+	 * entry stays unmarked while the network access itself stays opt-in.
+	 *
+	 * <p>It is deliberately separate from {@link #partyShare()} rather than folded into it:
+	 * partyShare shipped on by default and also drives RuneLite party sharing, which opens no
+	 * connection of its own, so flipping that to false would silently switch off features people
+	 * already rely on. {@link TcgGroupCollectionClient} is the only class behind this one.
+	 */
+	@ConfigItem(
+		keyName = SYNC_GROUP_COLLECTION,
+		name = "Sync group from osrs-tcg.net",
+		description = "Fetch your public OSRS TCG group's pooled cards from osrs-tcg.net, so members count even "
+			+ "while they are offline. While this is off the plugin sends no requests anywhere, and pooling "
+			+ "falls back to whoever is in your RuneLite party.",
+		warning = "Turning this on makes your client send your OSRS TCG group key to osrs-tcg.net every few "
+			+ "minutes to fetch the group's pooled cards. That server will see your IP address and which group "
+			+ "you are in. Leave it off if you would rather the plugin never talk to the network.",
+		section = FEEDBACK,
+		position = 8
+	)
+	default boolean syncGroupCollection()
+	{
+		return false;
 	}
 
 	@ConfigItem(

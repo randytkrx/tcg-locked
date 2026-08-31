@@ -66,17 +66,19 @@ final class TcgGroupCollectionClient
 	}
 
 	private final OkHttpClient httpClient;
+	private final TcgLockedConfig config;
 	private final HttpUrl baseUrl;
 
 	@Inject
-	TcgGroupCollectionClient(OkHttpClient httpClient)
+	TcgGroupCollectionClient(OkHttpClient httpClient, TcgLockedConfig config)
 	{
-		this(httpClient, DEFAULT_BASE);
+		this(httpClient, config, DEFAULT_BASE);
 	}
 
-	TcgGroupCollectionClient(OkHttpClient httpClient, HttpUrl baseUrl)
+	TcgGroupCollectionClient(OkHttpClient httpClient, TcgLockedConfig config, HttpUrl baseUrl)
 	{
 		this.httpClient = httpClient;
+		this.config = config;
 		this.baseUrl = baseUrl;
 	}
 
@@ -113,6 +115,15 @@ final class TcgGroupCollectionClient
 
 	private <T> Call enqueue(HttpUrl url, ResultCallback<T> callback, Parser<T> parser)
 	{
+		// The gate every request has to pass. The plugin already refuses to call in while the config
+		// Boolean is off, but this is the class that actually opens the connection, so the check lives
+		// here too: read fresh on each request, so a toggle flipped off mid-session stops the very next
+		// one. The caller is told it failed, which is a state it already handles by retrying later.
+		if (!config.syncGroupCollection())
+		{
+			callback.onFailure();
+			return null;
+		}
 		Call call = httpClient.newCall(new Request.Builder().url(url).get().build());
 		call.enqueue(new Callback()
 		{

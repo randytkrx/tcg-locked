@@ -69,7 +69,7 @@ public class TcgGroupCollectionClientTest
 		try (MockWebServer server = new MockWebServer())
 		{
 			server.enqueue(new MockResponse().setBody("{\"revision\":26,\"memberCount\":1}"));
-			TcgGroupCollectionClient client = new TcgGroupCollectionClient(new OkHttpClient(), server.url("/"));
+			TcgGroupCollectionClient client = new TcgGroupCollectionClient(new OkHttpClient(), syncEnabled(true), server.url("/"));
 			CapturingCallback<TcgGroupCollectionClient.Meta> callback = new CapturingCallback<>();
 			client.fetchMeta("EK8FKG", callback);
 
@@ -87,7 +87,7 @@ public class TcgGroupCollectionClientTest
 		try (MockWebServer server = new MockWebServer())
 		{
 			server.enqueue(new MockResponse().setResponseCode(429));
-			TcgGroupCollectionClient client = new TcgGroupCollectionClient(new OkHttpClient(), server.url("/"));
+			TcgGroupCollectionClient client = new TcgGroupCollectionClient(new OkHttpClient(), syncEnabled(true), server.url("/"));
 			CapturingCallback<TcgGroupCollectionClient.Meta> callback = new CapturingCallback<>();
 			client.fetchMeta("EK8FKG", callback);
 
@@ -103,7 +103,7 @@ public class TcgGroupCollectionClientTest
 		try (MockWebServer server = new MockWebServer())
 		{
 			server.enqueue(new MockResponse().setBody("{\"revision\":26,\"cards\":[]}"));
-			TcgGroupCollectionClient client = new TcgGroupCollectionClient(new OkHttpClient(), server.url("/"));
+			TcgGroupCollectionClient client = new TcgGroupCollectionClient(new OkHttpClient(), syncEnabled(true), server.url("/"));
 			CapturingCallback<TcgGroupCollectionClient.GroupCollection> callback = new CapturingCallback<>();
 			client.fetchCollection("EK8FKG", callback);
 
@@ -120,7 +120,7 @@ public class TcgGroupCollectionClientTest
 		try (MockWebServer server = new MockWebServer())
 		{
 			server.enqueue(new MockResponse().setBody(new String(new char[2 * 1024 * 1024 + 1])));
-			TcgGroupCollectionClient client = new TcgGroupCollectionClient(new OkHttpClient(), server.url("/"));
+			TcgGroupCollectionClient client = new TcgGroupCollectionClient(new OkHttpClient(), syncEnabled(true), server.url("/"));
 			CapturingCallback<TcgGroupCollectionClient.Meta> callback = new CapturingCallback<>();
 			client.fetchMeta("EK8FKG", callback);
 
@@ -135,7 +135,7 @@ public class TcgGroupCollectionClientTest
 		try (MockWebServer server = new MockWebServer())
 		{
 			server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
-			TcgGroupCollectionClient client = new TcgGroupCollectionClient(new OkHttpClient(), server.url("/"));
+			TcgGroupCollectionClient client = new TcgGroupCollectionClient(new OkHttpClient(), syncEnabled(true), server.url("/"));
 			CapturingCallback<TcgGroupCollectionClient.Meta> callback = new CapturingCallback<>();
 			Call call = client.fetchMeta("EK8FKG", callback);
 			assertNotNull(server.takeRequest(1, TimeUnit.SECONDS));
@@ -152,12 +152,73 @@ public class TcgGroupCollectionClientTest
 	{
 		try (MockWebServer server = new MockWebServer())
 		{
-			TcgGroupCollectionClient client = new TcgGroupCollectionClient(new OkHttpClient(), server.url("/"));
+			TcgGroupCollectionClient client = new TcgGroupCollectionClient(new OkHttpClient(), syncEnabled(true), server.url("/"));
 			CapturingCallback<TcgGroupCollectionClient.Meta> callback = new CapturingCallback<>();
 			assertNull(client.fetchMeta("not-a-code", callback));
 			assertTrue(callback.failed);
 			assertFalse(callback.result != null);
 		}
+	}
+
+	/**
+	 * The Plugin Hub requirement this guards: with the config Boolean off nothing may leave the
+	 * client. The server would answer happily if a request arrived, so an empty request count is
+	 * proof the gate held rather than proof the endpoint was missing.
+	 */
+	@Test
+	public void sendsNothingWhileGroupSyncIsDisabled() throws Exception
+	{
+		try (MockWebServer server = new MockWebServer())
+		{
+			server.enqueue(new MockResponse().setBody("{\"revision\":26,\"memberCount\":1}"));
+			server.enqueue(new MockResponse().setBody("{\"revision\":26,\"cards\":[]}"));
+			TcgGroupCollectionClient client = new TcgGroupCollectionClient(
+				new OkHttpClient(), syncEnabled(false), server.url("/"));
+
+			CapturingCallback<TcgGroupCollectionClient.Meta> meta = new CapturingCallback<>();
+			assertNull(client.fetchMeta("EK8FKG", meta));
+			assertTrue(meta.await());
+			assertTrue(meta.failed);
+
+			CapturingCallback<TcgGroupCollectionClient.GroupCollection> collection = new CapturingCallback<>();
+			assertNull(client.fetchCollection("EK8FKG", collection));
+			assertTrue(collection.await());
+			assertTrue(collection.failed);
+
+			assertEquals("no request may reach osrs-tcg.net while the toggle is off",
+				0, server.getRequestCount());
+		}
+	}
+
+	/** Positive control: the gate must switch the feature off, not delete it. */
+	@Test
+	public void sendsTheRequestOnceGroupSyncIsEnabled() throws Exception
+	{
+		try (MockWebServer server = new MockWebServer())
+		{
+			server.enqueue(new MockResponse().setBody("{\"revision\":26,\"memberCount\":1}"));
+			TcgGroupCollectionClient client = new TcgGroupCollectionClient(
+				new OkHttpClient(), syncEnabled(true), server.url("/"));
+			CapturingCallback<TcgGroupCollectionClient.Meta> callback = new CapturingCallback<>();
+
+			assertNotNull(client.fetchMeta("EK8FKG", callback));
+
+			assertTrue(callback.await());
+			assertNotNull(callback.result);
+			assertEquals(1, server.getRequestCount());
+		}
+	}
+
+	private static TcgLockedConfig syncEnabled(boolean enabled)
+	{
+		return new TcgLockedConfig()
+		{
+			@Override
+			public boolean syncGroupCollection()
+			{
+				return enabled;
+			}
+		};
 	}
 
 	private static final class CapturingCallback<T> implements TcgGroupCollectionClient.ResultCallback<T>

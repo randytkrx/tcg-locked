@@ -509,11 +509,26 @@ public class TcgLockedPlugin extends Plugin
 					lastBroadcast = null;
 					lastBroadcastOwned = Collections.emptySet();
 					lastBroadcastAudience = Collections.emptySet();
-					groupMetaTicks = activeTcgGroupKey == null ? -1 : 0;
+					groupMetaTicks = activeTcgGroupKey == null || !groupSyncEnabled() ? -1 : 0;
 				}
 				else
 				{
 					withdrawFromApprovedMembers();
+					cancelGroupRequest();
+				}
+				markSharedCatalogDirty();
+			}
+			if (TcgLockedConfig.SYNC_GROUP_COLLECTION.equals(event.getKey()))
+			{
+				if (groupSyncEnabled())
+				{
+					groupMetaTicks = activeTcgGroupKey == null ? -1 : 0;
+				}
+				else
+				{
+					// Cancels whatever is in flight and clears groupRequest. Without this a request
+					// that outlived the toggle would have its callback dropped by validGroupCallback
+					// and leave groupRequest non-null, which blocks every later sync.
 					cancelGroupRequest();
 				}
 				markSharedCatalogDirty();
@@ -535,7 +550,7 @@ public class TcgLockedPlugin extends Plugin
 			// EventBus.post is synchronous, so an answered query flips hasCollection before this line.
 			apiQueryTicks = collectionReader.hasCollection() ? -1 : API_QUERY_RETRY_TICKS;
 		}
-		if (config.partyShare() && activeTcgGroupKey != null && groupRequest == null
+		if (groupSyncEnabled() && activeTcgGroupKey != null && groupRequest == null
 			&& groupMetaTicks >= 0 && --groupMetaTicks < 0)
 		{
 			fetchGroupMeta();
@@ -2356,7 +2371,7 @@ public class TcgLockedPlugin extends Plugin
 		String next = collectionReader.groupKeyOrNull();
 		if (Objects.equals(activeTcgGroupKey, next))
 		{
-			if (next != null && config.partyShare() && groupRequest == null && groupMetaTicks < 0)
+			if (next != null && groupSyncEnabled() && groupRequest == null && groupMetaTicks < 0)
 			{
 				groupMetaTicks = 0;
 			}
@@ -2371,7 +2386,7 @@ public class TcgLockedPlugin extends Plugin
 		lockbookDirty = true;
 		markSharedCatalogDirty();
 		lastSharedWithBronzeman = null;
-		groupMetaTicks = next != null && config.partyShare() ? 0 : -1;
+		groupMetaTicks = next != null && groupSyncEnabled() ? 0 : -1;
 	}
 
 	private void loadTcgGroupCache()
@@ -2397,7 +2412,7 @@ public class TcgLockedPlugin extends Plugin
 			activeTcgGroupKey = groupKey;
 			tcgGroupRevision = revision;
 			tcgGroupOwnedKeys = keys;
-			groupMetaTicks = config.partyShare() ? 0 : -1;
+			groupMetaTicks = groupSyncEnabled() ? 0 : -1;
 			markSharedCatalogDirty();
 		}
 		catch (NumberFormatException ex)
@@ -2429,9 +2444,20 @@ public class TcgLockedPlugin extends Plugin
 		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_CACHE_REVISION);
 	}
 
+	/**
+	 * Guards every path that ends in an osrs-tcg.net request. Pooling still has to be on at all,
+	 * but the network itself is opt-in through its own Boolean, which defaults to off. Sites that
+	 * only drive RuneLite party sharing keep testing {@code partyShare()} directly, because that
+	 * opens no connection of its own.
+	 */
+	private boolean groupSyncEnabled()
+	{
+		return config.partyShare() && config.syncGroupCollection();
+	}
+
 	private void fetchGroupMeta()
 	{
-		if (!started || !config.partyShare() || activeTcgGroupKey == null || groupRequest != null)
+		if (!started || !groupSyncEnabled() || activeTcgGroupKey == null || groupRequest != null)
 		{
 			return;
 		}
@@ -2523,7 +2549,7 @@ public class TcgLockedPlugin extends Plugin
 
 	private boolean validGroupCallback(int lifecycle, int sync, String groupKey)
 	{
-		return started && config.partyShare() && lifecycleGeneration == lifecycle
+		return started && groupSyncEnabled() && lifecycleGeneration == lifecycle
 			&& groupSyncGeneration == sync && Objects.equals(activeTcgGroupKey, groupKey);
 	}
 
