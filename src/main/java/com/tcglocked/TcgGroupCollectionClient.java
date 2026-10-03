@@ -41,6 +41,11 @@ final class TcgGroupCollectionClient
 		void onFailure();
 	}
 
+	interface BetaNamesCallback extends ResultCallback<BetaNames>
+	{
+		void onPlayerNotFound();
+	}
+
 	static final class Meta
 	{
 		final int revision;
@@ -57,9 +62,25 @@ final class TcgGroupCollectionClient
 	{
 		final int revision;
 		final Set<String> cardKeys;
+		final Set<String> memberNames;
 
-		private GroupCollection(int revision, Set<String> cardKeys)
+		private GroupCollection(int revision, Set<String> cardKeys, Set<String> memberNames)
 		{
+			this.revision = revision;
+			this.cardKeys = cardKeys;
+			this.memberNames = memberNames;
+		}
+	}
+
+	static final class BetaNames
+	{
+		final String displayName;
+		final int revision;
+		final Set<String> cardKeys;
+
+		private BetaNames(String displayName, int revision, Set<String> cardKeys)
+		{
+			this.displayName = displayName;
 			this.revision = revision;
 			this.cardKeys = cardKeys;
 		}
@@ -102,6 +123,72 @@ final class TcgGroupCollectionClient
 			return null;
 		}
 		return enqueue(url(groupKey, "collection"), callback, TcgGroupCollectionClient::parseCollection);
+	}
+
+	Call fetchBetaNames(String rawPlayerName, BetaNamesCallback callback)
+	{
+		String playerName = rawPlayerName == null ? "" : rawPlayerName.trim();
+		if (playerName.isEmpty() || playerName.length() > MAX_CARD_NAME_LENGTH)
+		{
+			callback.onFailure();
+			return null;
+		}
+		HttpUrl url = baseUrl.newBuilder()
+			.addPathSegments("api/v1/players")
+			.addPathSegment(playerName.replace("_", "__"))
+			.addPathSegment("beta-names")
+			.build();
+		if (!config.syncGroupCollection())
+		{
+			callback.onFailure();
+			return null;
+		}
+		Call call = httpClient.newCall(new Request.Builder().url(url).get().build());
+		call.enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+				callback.onFailure();
+			}
+
+			@Override
+			public void onResponse(Call call, Response response)
+			{
+				try (Response ignored = response)
+				{
+					if (response.body() == null || response.body().contentLength() > MAX_RESPONSE_BYTES)
+					{
+						callback.onFailure();
+						return;
+					}
+					byte[] body = readLimited(response.body().byteStream());
+					if (body == null)
+					{
+						callback.onFailure();
+						return;
+					}
+					String json = new String(body, StandardCharsets.UTF_8);
+					if (response.code() == 404 && isPlayerNotFound(json))
+					{
+						callback.onPlayerNotFound();
+						return;
+					}
+					BetaNames parsed = response.isSuccessful() ? parseBetaNames(json) : null;
+					if (parsed == null)
+					{
+						callback.onFailure();
+						return;
+					}
+					callback.onSuccess(parsed);
+				}
+				catch (IOException | RuntimeException ex)
+				{
+					callback.onFailure();
+				}
+			}
+		});
+		return call;
 	}
 
 	private HttpUrl url(String groupKey, String endpoint)
@@ -191,6 +278,7 @@ final class TcgGroupCollectionClient
 			return null;
 		}
 		Set<String> keys = new HashSet<>();
+		Set<String> memberNames = new HashSet<>();
 		for (JsonElement element : cards)
 		{
 			if (!element.isJsonObject())
@@ -211,7 +299,27 @@ final class TcgGroupCollectionClient
 			{
 				return null;
 			}
-			if (ownersElement.getAsJsonArray().size() > 0)
+			JsonArray owners = ownersElement.getAsJsonArray();
+			for (JsonElement ownerElement : owners)
+			{
+				if (!ownerElement.isJsonObject())
+				{
+					return null;
+				}
+				JsonElement displayNameElement = ownerElement.getAsJsonObject().get("displayName");
+				if (displayNameElement == null || !displayNameElement.isJsonPrimitive()
+					|| !displayNameElement.getAsJsonPrimitive().isString())
+				{
+					return null;
+				}
+				String displayName = displayNameElement.getAsString().trim();
+				if (displayName.isEmpty() || displayName.length() > MAX_CARD_NAME_LENGTH)
+				{
+					return null;
+				}
+				memberNames.add(displayName);
+			}
+			if (owners.size() > 0)
 			{
 				String key = TcgItemNameNormalizer.normalize(name);
 				if (!key.isEmpty())
@@ -220,7 +328,60 @@ final class TcgGroupCollectionClient
 				}
 			}
 		}
-		return new GroupCollection(revision, Collections.unmodifiableSet(keys));
+		return new GroupCollection(revision, Collections.unmodifiableSet(keys),
+			Collections.unmodifiableSet(memberNames));
+	}
+
+	static BetaNames parseBetaNames(String json)
+	{
+		JsonObject root = object(json);
+		Integer revision = integer(root, "revision");
+		JsonElement displayNameElement = root == null ? null : root.get("displayName");
+		JsonElement cardsElement = root == null ? null : root.get("cardNames");
+		if (revision == null || revision < 0 || displayNameElement == null
+			|| !displayNameElement.isJsonPrimitive() || !displayNameElement.getAsJsonPrimitive().isString()
+			|| cardsElement == null || !cardsElement.isJsonArray())
+		{
+			return null;
+		}
+		String displayName = displayNameElement.getAsString().trim();
+		JsonArray cards = cardsElement.getAsJsonArray();
+		if (displayName.isEmpty() || displayName.length() > MAX_CARD_NAME_LENGTH || cards.size() > MAX_CARDS)
+		{
+			return null;
+		}
+		Set<String> keys = new HashSet<>();
+		for (JsonElement element : cards)
+		{
+			if (!element.isJsonPrimitive() || !element.getAsJsonPrimitive().isString())
+			{
+				return null;
+			}
+			String name = element.getAsString().trim();
+			if (name.isEmpty() || name.length() > MAX_CARD_NAME_LENGTH)
+			{
+				return null;
+			}
+			String key = TcgItemNameNormalizer.normalize(name);
+			if (!key.isEmpty())
+			{
+				keys.add(key);
+			}
+		}
+		return new BetaNames(displayName, revision, Collections.unmodifiableSet(keys));
+	}
+
+	private static boolean isPlayerNotFound(String json)
+	{
+		JsonObject root = object(json);
+		JsonElement errorElement = root == null ? null : root.get("error");
+		if (errorElement == null || !errorElement.isJsonObject())
+		{
+			return false;
+		}
+		JsonElement code = errorElement.getAsJsonObject().get("code");
+		return code != null && code.isJsonPrimitive() && code.getAsJsonPrimitive().isString()
+			&& "player_not_found".equals(code.getAsString());
 	}
 
 	private static JsonObject object(String json)

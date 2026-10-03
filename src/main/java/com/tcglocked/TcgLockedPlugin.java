@@ -93,6 +93,12 @@ public class TcgLockedPlugin extends Plugin
 	private static final String TCG_GROUP_CACHE_KEY = "tcgGroupKey";
 	private static final String TCG_GROUP_CACHE_REVISION = "tcgGroupRevision";
 	private static final String TCG_GROUP_CACHE_CARDS = "tcgGroupCards";
+	private static final String LOCAL_BETA_CACHE_PLAYER = "localBetaPlayer";
+	private static final String LOCAL_BETA_CACHE_REVISION = "localBetaRevision";
+	private static final String LOCAL_BETA_CACHE_CARDS = "localBetaCards";
+	private static final String TCG_GROUP_BETA_REVISION = "tcgGroupBetaRevision";
+	private static final String TCG_GROUP_BETA_MEMBERS = "tcgGroupBetaMembers";
+	private static final String TCG_GROUP_BETA_CARDS = "tcgGroupBetaCards";
 	private static final String TCG_GROUP_LABEL = "OSRS TCG group";
 	private static final int RECENT_UNLOCK_CAP = 30;
 	/** Splits a use-on menu target, as in "Knife -> Yew tree". */
@@ -213,9 +219,24 @@ public class TcgLockedPlugin extends Plugin
 	private int groupMetaTicks = -1;
 	private int groupSyncGeneration;
 	private okhttp3.Call groupRequest;
+	private okhttp3.Call localBetaRequest;
+	private int localBetaGeneration;
+	private final List<okhttp3.Call> groupBetaRequests = new ArrayList<>();
+	private int betaBatchGeneration;
 	private String activeTcgGroupKey;
 	private int tcgGroupRevision = -1;
+	private Set<String> tcgGroupCurrentKeys = Collections.emptySet();
 	private Set<String> tcgGroupOwnedKeys = Collections.emptySet();
+	private Set<String> tcgGroupBetaKeys = Collections.emptySet();
+	private Set<String> tcgGroupMemberNames = Collections.emptySet();
+	private Set<String> pendingGroupBetaKeys = Collections.emptySet();
+	private int pendingGroupBetaRequests;
+	private boolean groupBetaFailed;
+	private boolean groupBetaAttempted;
+	private String activeLocalBetaPlayer;
+	private int localBetaRevision = -1;
+	private Set<String> localBetaOwnedKeys = Collections.emptySet();
+	private boolean localBetaAttempted;
 
 	/**
 	 * Whether this session has said in chat that no collection arrived, and that one did. Suspended
@@ -422,6 +443,7 @@ public class TcgLockedPlugin extends Plugin
 		lastBroadcastAudience = Collections.emptySet();
 		partyIdentityRefreshTicks = 0;
 		resetGroupSync();
+		resetLocalBetaSync();
 		// Withdraw the pooled cards from Bronzeman TCG: with this plugin off, the group's unlocks
 		// should stop applying there too rather than linger for the rest of the session.
 		shareUnlocksWithBronzeman();
@@ -471,6 +493,7 @@ public class TcgLockedPlugin extends Plugin
 			// when the TCG plugin is running) so the refresh below reads the real collection rather
 			// than a transiently unknown one. Also re-syncs after a push we missed while hopping.
 			forceQueryTcgApi();
+			localBetaAttempted = false;
 			scheduleRefresh();
 		}
 	}
@@ -531,6 +554,8 @@ public class TcgLockedPlugin extends Plugin
 					// and leave groupRequest non-null, which blocks every later sync.
 					cancelGroupRequest();
 				}
+				cancelLocalBetaRequest();
+				localBetaAttempted = false;
 				markSharedCatalogDirty();
 			}
 			rebuildExtraAllow();
@@ -626,6 +651,7 @@ public class TcgLockedPlugin extends Plugin
 		withdrawFromApprovedMembers();
 		collectionReader.invalidate();
 		resetGroupSync();
+		resetLocalBetaSync();
 		markSharedCatalogDirty();
 		poolConsent.invalidate();
 		pooledKeys.clear();
@@ -1128,6 +1154,9 @@ public class TcgLockedPlugin extends Plugin
 		invokeLaterIfStarted(() ->
 		{
 			forceQueryTcgApi();
+			localBetaAttempted = false;
+			fetchLocalBetaIfNeeded();
+			groupBetaAttempted = false;
 			groupMetaTicks = activeTcgGroupKey == null ? -1 : 0;
 			refreshOwned();
 		});
@@ -1189,7 +1218,9 @@ public class TcgLockedPlugin extends Plugin
 			poolConsent.load(profileKey);
 			loadPooledPartners();
 			loadTcgGroupCache();
+			loadLocalBetaCache();
 		}
+		fetchLocalBetaIfNeeded();
 		syncTcgGroupKey();
 
 		Set<String> snapshot = collectionReader.snapshotOrNull();
@@ -1204,8 +1235,9 @@ public class TcgLockedPlugin extends Plugin
 				normalized.add(key);
 			}
 		}
+		normalized.addAll(localBetaOwnedKeys);
 		ownedLower = owned;
-		ownedNormalized = normalized;
+		ownedNormalized = Collections.unmodifiableSet(normalized);
 
 		if (!collectionKnown)
 		{
@@ -1954,6 +1986,10 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return TcgLockedStatus.UnlockSource.UNCARDED;
 		}
+		if (localBetaOwnedKeys.contains(key))
+		{
+			return TcgLockedStatus.UnlockSource.OWNED;
+		}
 		if (!hasItemIds && ownedNormalized.contains(key))
 		{
 			return TcgLockedStatus.UnlockSource.OWNED;
@@ -2020,7 +2056,9 @@ public class TcgLockedPlugin extends Plugin
 	 */
 	private void shareUnlocksWithBronzeman()
 	{
-		Set<String> pooled = new HashSet<>();
+		// The normal OSRS TCG feed no longer includes historical Beta cards, so include the
+		// separately fetched local set when Bronzeman is the plugin enforcing the locks.
+		Set<String> pooled = new HashSet<>(localBetaOwnedKeys);
 		if (config.partyShare())
 		{
 			for (Set<String> keys : pooledKeys.values())
@@ -2381,7 +2419,11 @@ public class TcgLockedPlugin extends Plugin
 		cancelGroupRequest();
 		activeTcgGroupKey = next;
 		tcgGroupRevision = -1;
+		tcgGroupCurrentKeys = Collections.emptySet();
 		tcgGroupOwnedKeys = Collections.emptySet();
+		tcgGroupBetaKeys = Collections.emptySet();
+		tcgGroupMemberNames = Collections.emptySet();
+		groupBetaAttempted = false;
 		clearTcgGroupCache();
 		lockbookDirty = true;
 		markSharedCatalogDirty();
@@ -2411,7 +2453,9 @@ public class TcgLockedPlugin extends Plugin
 			}
 			activeTcgGroupKey = groupKey;
 			tcgGroupRevision = revision;
-			tcgGroupOwnedKeys = keys;
+			tcgGroupCurrentKeys = keys;
+			loadTcgGroupBetaCache();
+			rebuildTcgGroupOwnedKeys();
 			groupMetaTicks = groupSyncEnabled() ? 0 : -1;
 			markSharedCatalogDirty();
 		}
@@ -2431,7 +2475,7 @@ public class TcgLockedPlugin extends Plugin
 		configManager.setRSProfileConfiguration(
 			TcgLockedConfig.GROUP, TCG_GROUP_CACHE_KEY, activeTcgGroupKey);
 		configManager.setRSProfileConfiguration(
-			TcgLockedConfig.GROUP, TCG_GROUP_CACHE_CARDS, cardCatalog.packKeys(tcgGroupOwnedKeys));
+			TcgLockedConfig.GROUP, TCG_GROUP_CACHE_CARDS, cardCatalog.packKeys(tcgGroupCurrentKeys));
 		// Revision is written last and acts as the commit marker for the key + collection pair.
 		configManager.setRSProfileConfiguration(
 			TcgLockedConfig.GROUP, TCG_GROUP_CACHE_REVISION, Integer.toString(tcgGroupRevision));
@@ -2442,6 +2486,324 @@ public class TcgLockedPlugin extends Plugin
 		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_CACHE_KEY);
 		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_CACHE_CARDS);
 		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_CACHE_REVISION);
+		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_BETA_MEMBERS);
+		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_BETA_CARDS);
+		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_BETA_REVISION);
+	}
+
+	private void rebuildTcgGroupOwnedKeys()
+	{
+		Set<String> combined = new HashSet<>(tcgGroupCurrentKeys);
+		combined.addAll(tcgGroupBetaKeys);
+		tcgGroupOwnedKeys = Collections.unmodifiableSet(combined);
+	}
+
+	private void loadLocalBetaCache()
+	{
+		String playerName = client.getLocalPlayer() == null ? null : client.getLocalPlayer().getName();
+		String playerKey = TcgLockedPoolConsent.key(playerName);
+		activeLocalBetaPlayer = playerName == null ? null : playerName.trim();
+		localBetaRevision = -1;
+		localBetaOwnedKeys = Collections.emptySet();
+		if (playerKey.isEmpty())
+		{
+			return;
+		}
+		String storedPlayer = configManager.getRSProfileConfiguration(
+			TcgLockedConfig.GROUP, LOCAL_BETA_CACHE_PLAYER);
+		String revisionText = configManager.getRSProfileConfiguration(
+			TcgLockedConfig.GROUP, LOCAL_BETA_CACHE_REVISION);
+		String packed = configManager.getRSProfileConfiguration(
+			TcgLockedConfig.GROUP, LOCAL_BETA_CACHE_CARDS);
+		if (!playerKey.equals(TcgLockedPoolConsent.key(storedPlayer)) || revisionText == null || packed == null)
+		{
+			return;
+		}
+		try
+		{
+			int revision = Integer.parseInt(revisionText);
+			Set<String> keys = cardCatalog.unpackKeysOrNull(packed);
+			if (revision >= 0 && keys != null)
+			{
+				localBetaRevision = revision;
+				localBetaOwnedKeys = keys;
+			}
+		}
+		catch (NumberFormatException ex)
+		{
+			log.debug("TCG Locked: ignored malformed cached Beta revision.");
+		}
+	}
+
+	private void persistLocalBetaCache()
+	{
+		if (activeLocalBetaPlayer == null || localBetaRevision < 0)
+		{
+			return;
+		}
+		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, LOCAL_BETA_CACHE_REVISION);
+		configManager.setRSProfileConfiguration(
+			TcgLockedConfig.GROUP, LOCAL_BETA_CACHE_PLAYER, activeLocalBetaPlayer);
+		configManager.setRSProfileConfiguration(
+			TcgLockedConfig.GROUP, LOCAL_BETA_CACHE_CARDS, cardCatalog.packKeys(localBetaOwnedKeys));
+		configManager.setRSProfileConfiguration(
+			TcgLockedConfig.GROUP, LOCAL_BETA_CACHE_REVISION, Integer.toString(localBetaRevision));
+	}
+
+	private void fetchLocalBetaIfNeeded()
+	{
+		String playerName = client.getLocalPlayer() == null ? null : client.getLocalPlayer().getName();
+		String playerKey = TcgLockedPoolConsent.key(playerName);
+		String activeKey = TcgLockedPoolConsent.key(activeLocalBetaPlayer);
+		if (!playerKey.equals(activeKey))
+		{
+			cancelLocalBetaRequest();
+			activeLocalBetaPlayer = playerName == null ? null : playerName.trim();
+			localBetaRevision = -1;
+			localBetaOwnedKeys = Collections.emptySet();
+			localBetaAttempted = false;
+			loadLocalBetaCache();
+		}
+		if (!started || seenProfileKey == null || !config.syncGroupCollection() || playerKey.isEmpty()
+			|| localBetaRequest != null || localBetaAttempted)
+		{
+			return;
+		}
+		localBetaAttempted = true;
+		final int lifecycle = lifecycleGeneration;
+		final int generation = localBetaGeneration;
+		final String requestedKey = playerKey;
+		localBetaRequest = groupCollectionClient.fetchBetaNames(playerName,
+			new TcgGroupCollectionClient.BetaNamesCallback()
+			{
+				@Override
+				public void onSuccess(TcgGroupCollectionClient.BetaNames result)
+				{
+					clientThread.invokeLater(() -> applyLocalBetaNames(
+						lifecycle, generation, requestedKey, result));
+				}
+
+				@Override
+				public void onPlayerNotFound()
+				{
+					clientThread.invokeLater(() -> finishLocalBetaFailure(lifecycle, generation, requestedKey));
+				}
+
+				@Override
+				public void onFailure()
+				{
+					clientThread.invokeLater(() -> finishLocalBetaFailure(lifecycle, generation, requestedKey));
+				}
+			});
+	}
+
+	private void applyLocalBetaNames(int lifecycle, int generation, String playerKey,
+		TcgGroupCollectionClient.BetaNames result)
+	{
+		if (!validLocalBetaCallback(lifecycle, generation, playerKey))
+		{
+			return;
+		}
+		localBetaRequest = null;
+		Set<String> known = cardCatalog.allCardKeys();
+		known.retainAll(result.cardKeys);
+		localBetaOwnedKeys = Collections.unmodifiableSet(known);
+		localBetaRevision = result.revision;
+		activeLocalBetaPlayer = result.displayName;
+		persistLocalBetaCache();
+		lockbookDirty = true;
+		lastBroadcast = null;
+		refreshOwned();
+	}
+
+	private void finishLocalBetaFailure(int lifecycle, int generation, String playerKey)
+	{
+		if (validLocalBetaCallback(lifecycle, generation, playerKey))
+		{
+			localBetaRequest = null;
+		}
+	}
+
+	private boolean validLocalBetaCallback(int lifecycle, int generation, String playerKey)
+	{
+		return started && config.syncGroupCollection() && lifecycleGeneration == lifecycle
+			&& localBetaGeneration == generation
+			&& playerKey.equals(TcgLockedPoolConsent.key(activeLocalBetaPlayer));
+	}
+
+	private void cancelLocalBetaRequest()
+	{
+		localBetaGeneration++;
+		if (localBetaRequest != null)
+		{
+			localBetaRequest.cancel();
+			localBetaRequest = null;
+		}
+	}
+
+	private void resetLocalBetaSync()
+	{
+		cancelLocalBetaRequest();
+		activeLocalBetaPlayer = null;
+		localBetaRevision = -1;
+		localBetaOwnedKeys = Collections.emptySet();
+		localBetaAttempted = false;
+	}
+
+	private void loadTcgGroupBetaCache()
+	{
+		String revisionText = configManager.getRSProfileConfiguration(
+			TcgLockedConfig.GROUP, TCG_GROUP_BETA_REVISION);
+		String membersText = configManager.getRSProfileConfiguration(
+			TcgLockedConfig.GROUP, TCG_GROUP_BETA_MEMBERS);
+		String packed = configManager.getRSProfileConfiguration(
+			TcgLockedConfig.GROUP, TCG_GROUP_BETA_CARDS);
+		if (!Integer.toString(tcgGroupRevision).equals(revisionText) || membersText == null || packed == null)
+		{
+			return;
+		}
+		Set<String> keys = cardCatalog.unpackKeysOrNull(packed);
+		if (keys == null)
+		{
+			return;
+		}
+		Set<String> members = new HashSet<>();
+		for (String name : membersText.split("\\n"))
+		{
+			String trimmed = name.trim();
+			if (!trimmed.isEmpty())
+			{
+				members.add(trimmed);
+			}
+		}
+		tcgGroupBetaKeys = keys;
+		tcgGroupMemberNames = Collections.unmodifiableSet(members);
+		groupBetaAttempted = false;
+	}
+
+	private void persistTcgGroupBetaCache()
+	{
+		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_BETA_REVISION);
+		configManager.setRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_BETA_CARDS,
+			cardCatalog.packKeys(tcgGroupBetaKeys));
+		List<String> members = new ArrayList<>(tcgGroupMemberNames);
+		Collections.sort(members, String.CASE_INSENSITIVE_ORDER);
+		configManager.setRSProfileConfiguration(
+			TcgLockedConfig.GROUP, TCG_GROUP_BETA_MEMBERS, String.join("\n", members));
+		// Written last so a partial write can never bind cards from an older member list to this revision.
+		configManager.setRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_BETA_REVISION,
+			Integer.toString(tcgGroupRevision));
+	}
+
+	private void fetchGroupBetaNames(String groupKey, Set<String> memberNames)
+	{
+		if (!started || !groupSyncEnabled() || !Objects.equals(activeTcgGroupKey, groupKey)
+			|| !groupBetaRequests.isEmpty() || memberNames.isEmpty())
+		{
+			return;
+		}
+		Map<String, String> uniqueMembers = new HashMap<>();
+		for (String memberName : memberNames)
+		{
+			String key = TcgLockedPoolConsent.key(memberName);
+			if (!key.isEmpty())
+			{
+				uniqueMembers.putIfAbsent(key, memberName.trim());
+			}
+		}
+		if (uniqueMembers.isEmpty())
+		{
+			return;
+		}
+		groupBetaAttempted = true;
+		final int lifecycle = lifecycleGeneration;
+		final int sync = groupSyncGeneration;
+		final int batch = ++betaBatchGeneration;
+		pendingGroupBetaKeys = new HashSet<>();
+		pendingGroupBetaRequests = uniqueMembers.size();
+		groupBetaFailed = false;
+		for (String memberName : uniqueMembers.values())
+		{
+			okhttp3.Call call = groupCollectionClient.fetchBetaNames(memberName,
+				new TcgGroupCollectionClient.BetaNamesCallback()
+				{
+					@Override
+					public void onSuccess(TcgGroupCollectionClient.BetaNames result)
+					{
+						clientThread.invokeLater(() -> finishGroupBetaResult(
+							lifecycle, sync, batch, groupKey, result.cardKeys, false));
+					}
+
+					@Override
+					public void onPlayerNotFound()
+					{
+						clientThread.invokeLater(() -> finishGroupBetaResult(
+							lifecycle, sync, batch, groupKey, Collections.emptySet(), true));
+					}
+
+					@Override
+					public void onFailure()
+					{
+						clientThread.invokeLater(() -> finishGroupBetaResult(
+							lifecycle, sync, batch, groupKey, Collections.emptySet(), true));
+					}
+				});
+			if (call != null)
+			{
+				groupBetaRequests.add(call);
+			}
+		}
+	}
+
+	private void finishGroupBetaResult(int lifecycle, int sync, int batch, String groupKey,
+		Set<String> keys, boolean failed)
+	{
+		if (!started || !groupSyncEnabled() || lifecycleGeneration != lifecycle
+			|| groupSyncGeneration != sync || betaBatchGeneration != batch
+			|| !Objects.equals(activeTcgGroupKey, groupKey))
+		{
+			return;
+		}
+		groupBetaFailed |= failed;
+		if (!failed)
+		{
+			Set<String> known = cardCatalog.allCardKeys();
+			known.retainAll(keys);
+			pendingGroupBetaKeys.addAll(known);
+		}
+		if (--pendingGroupBetaRequests > 0)
+		{
+			return;
+		}
+		groupBetaRequests.clear();
+		if (groupBetaFailed)
+		{
+			pendingGroupBetaKeys = Collections.emptySet();
+			// Retry with the next five-minute metadata poll while retaining the last complete set.
+			groupBetaAttempted = false;
+			return;
+		}
+		tcgGroupBetaKeys = Collections.unmodifiableSet(new HashSet<>(pendingGroupBetaKeys));
+		pendingGroupBetaKeys = Collections.emptySet();
+		rebuildTcgGroupOwnedKeys();
+		persistTcgGroupBetaCache();
+		lockbookDirty = true;
+		markSharedCatalogDirty();
+		lastSharedWithBronzeman = null;
+		refreshOwned();
+	}
+
+	private void cancelGroupBetaRequests()
+	{
+		betaBatchGeneration++;
+		for (okhttp3.Call call : groupBetaRequests)
+		{
+			call.cancel();
+		}
+		groupBetaRequests.clear();
+		pendingGroupBetaKeys = Collections.emptySet();
+		pendingGroupBetaRequests = 0;
+		groupBetaFailed = false;
 	}
 
 	/**
@@ -2490,8 +2852,12 @@ public class TcgLockedPlugin extends Plugin
 		}
 		groupRequest = null;
 		groupMetaTicks = GROUP_META_REFRESH_TICKS;
-		if (meta.revision == tcgGroupRevision)
+		if (meta.revision == tcgGroupRevision && !tcgGroupMemberNames.isEmpty())
 		{
+			if (!groupBetaAttempted)
+			{
+				fetchGroupBetaNames(groupKey, tcgGroupMemberNames);
+			}
 			return;
 		}
 		final int expectedRevision = meta.revision;
@@ -2526,15 +2892,26 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return;
 		}
+		// A previous revision's per-member requests must not be allowed to finish into this snapshot.
+		cancelGroupBetaRequests();
 		Set<String> known = cardCatalog.allCardKeys();
 		known.retainAll(collection.cardKeys);
-		tcgGroupOwnedKeys = Collections.unmodifiableSet(known);
+		tcgGroupCurrentKeys = Collections.unmodifiableSet(known);
 		tcgGroupRevision = collection.revision;
+		Set<String> members = new HashSet<>(collection.memberNames);
+		String localName = client.getLocalPlayer() == null ? null : client.getLocalPlayer().getName();
+		if (localName != null && !localName.trim().isEmpty())
+		{
+			members.add(localName.trim());
+		}
+		tcgGroupMemberNames = Collections.unmodifiableSet(members);
+		rebuildTcgGroupOwnedKeys();
 		persistTcgGroupCache();
 		lockbookDirty = true;
 		markSharedCatalogDirty();
 		lastSharedWithBronzeman = null;
 		refreshOwned();
+		fetchGroupBetaNames(groupKey, tcgGroupMemberNames);
 	}
 
 	private void finishGroupFailure(int lifecycle, int sync, String groupKey)
@@ -2556,6 +2933,7 @@ public class TcgLockedPlugin extends Plugin
 	private void cancelGroupRequest()
 	{
 		groupSyncGeneration++;
+		cancelGroupBetaRequests();
 		if (groupRequest != null)
 		{
 			groupRequest.cancel();
@@ -2569,7 +2947,11 @@ public class TcgLockedPlugin extends Plugin
 		cancelGroupRequest();
 		activeTcgGroupKey = null;
 		tcgGroupRevision = -1;
+		tcgGroupCurrentKeys = Collections.emptySet();
 		tcgGroupOwnedKeys = Collections.emptySet();
+		tcgGroupBetaKeys = Collections.emptySet();
+		tcgGroupMemberNames = Collections.emptySet();
+		groupBetaAttempted = false;
 		lockbookDirty = true;
 		sharedCatalogDirty = true;
 		lastSharedWithBronzeman = null;
@@ -2611,7 +2993,7 @@ public class TcgLockedPlugin extends Plugin
 		// unlocks it, and the card's own name is what the collection is keyed by, not the NPC's.
 		for (String card : cards)
 		{
-			if ((!hasNpcIds && ownedNormalized.contains(card))
+			if (localBetaOwnedKeys.contains(card) || (!hasNpcIds && ownedNormalized.contains(card))
 				|| extraAllowNormalized.contains(card) || unlockedByParty(card))
 			{
 				return true;

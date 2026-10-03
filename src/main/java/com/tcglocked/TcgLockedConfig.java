@@ -275,7 +275,7 @@ public interface TcgLockedConfig extends Config
 		keyName = "partyShare",
 		name = "Pool group cards",
 		description = "Pool cards with the people you play with. Sharing over a RuneLite party works on its own; "
-			+ "pooling from a public OSRS TCG group, including offline members, also needs \"Sync group from "
+			+ "pooling from a public OSRS TCG group, including offline members, also needs \"Sync cards from "
 			+ "osrs-tcg.net\" below.",
 		section = FEEDBACK,
 		position = 7
@@ -297,13 +297,13 @@ public interface TcgLockedConfig extends Config
 	 */
 	@ConfigItem(
 		keyName = SYNC_GROUP_COLLECTION,
-		name = "Sync group from osrs-tcg.net",
-		description = "Fetch your public OSRS TCG group's pooled cards from osrs-tcg.net, so members count even "
-			+ "while they are offline. While this is off the plugin sends no requests anywhere, and pooling "
-			+ "falls back to whoever is in your RuneLite party.",
-		warning = "Turning this on makes your client send your OSRS TCG group key to osrs-tcg.net every few "
-			+ "minutes to fetch the group's pooled cards. That server will see your IP address and which group "
-			+ "you are in. Leave it off if you would rather the plugin never talk to the network.",
+		name = "Sync cards from osrs-tcg.net",
+		description = "Fetch historical Beta cards for you and your public OSRS TCG group. Current cards still "
+			+ "sync locally through the OSRS TCG plugin. Successful results are cached so a temporary lookup "
+			+ "failure never removes progress.",
+		warning = "Turning this on sends your RuneScape display name, your OSRS TCG group key, and group member "
+			+ "display names to osrs-tcg.net to retrieve public collections. That server will see your IP address "
+			+ "and the names requested. Leave it off if you would rather the plugin never talk to the network.",
 		section = FEEDBACK,
 		position = 8
 	)

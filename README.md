@@ -51,6 +51,12 @@ downloads the combined collection when that revision changes.
 Existing RuneLite party groups continue to work. Their approvals and saved pooled
 progress are kept separately, so updating does not discard an established run.
 
+Historical Beta cards are retrieved from OSRS TCG's public player lookup because
+they are no longer included in the current collection feed. TCG Locked combines
+those names with current cards and caches the last successful result. A failed
+lookup never replaces a known collection, while a successful empty collection is
+treated as genuinely empty.
+
 ## The panel and the unlocks
 
 A side panel tracks your run: cards owned, unlocks this session, a feed of your
@@ -81,11 +87,13 @@ gear.
 
 ## Network and privacy
 
-Solo ownership is exchanged locally between RuneLite plugins. When group pooling
-is enabled and OSRS TCG reports a group code, TCG Locked sends that code to the
-public group endpoints at `osrs-tcg.net`. This exposes your IP address and group
-code to that third-party service. TCG Locked does not receive or send your OSRS TCG
-login token. Disable **Pool group cards** to stop these group requests.
+Current ownership is exchanged locally between RuneLite plugins. If **Sync cards
+from osrs-tcg.net** is enabled, TCG Locked sends your display name to the public
+Beta endpoint. For website groups it also sends the group code and each member's
+display name so their Beta collections can be combined. This exposes your IP
+address and those identifiers to that third-party service. TCG Locked does not
+receive or send your OSRS TCG login token. Leave that setting disabled to prevent
+all requests from this plugin; previously cached successful results remain local.
 
 ## Bugs and feature requests
 

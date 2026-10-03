@@ -53,6 +53,33 @@ public class TcgGroupCollectionClientTest
 			TcgGroupCollectionClient.parseCollection(json);
 		assertEquals(26, collection.revision);
 		assertEquals(Set.of("abyssal whip", "npc:15220"), collection.cardKeys);
+		assertEquals(Set.of("Azu"), collection.memberNames);
+	}
+
+	@Test
+	public void betaNamesAcceptsOwnedAndEmptyCollections()
+	{
+		TcgGroupCollectionClient.BetaNames owned = TcgGroupCollectionClient.parseBetaNames(
+			"{\"displayName\":\"Player Name\",\"revision\":123,"
+				+ "\"cardNames\":[\"Logs\",\"Uncut sapphire\",\"Logs\"]}");
+		assertEquals("Player Name", owned.displayName);
+		assertEquals(123, owned.revision);
+		assertEquals(Set.of("logs", "uncut sapphire"), owned.cardKeys);
+
+		TcgGroupCollectionClient.BetaNames empty = TcgGroupCollectionClient.parseBetaNames(
+			"{\"displayName\":\"Player Name\",\"revision\":124,\"cardNames\":[]}");
+		assertTrue(empty.cardKeys.isEmpty());
+	}
+
+	@Test
+	public void malformedBetaNamesAreRejected()
+	{
+		assertNull(TcgGroupCollectionClient.parseBetaNames(
+			"{\"displayName\":\"Player\",\"revision\":1}"));
+		assertNull(TcgGroupCollectionClient.parseBetaNames(
+			"{\"displayName\":\"Player\",\"revision\":1.5,\"cardNames\":[]}"));
+		assertNull(TcgGroupCollectionClient.parseBetaNames(
+			"{\"displayName\":\"Player\",\"revision\":1,\"cardNames\":[42]}"));
 	}
 
 	@Test
@@ -111,6 +138,61 @@ public class TcgGroupCollectionClientTest
 			assertNotNull(callback.result);
 			RecordedRequest request = server.takeRequest(1, TimeUnit.SECONDS);
 			assertEquals("/api/v1/groups/EK8FKG/collection", request.getPath());
+		}
+	}
+
+	@Test
+	public void betaRequestDoublesUnderscoresBeforeEncoding() throws Exception
+	{
+		try (MockWebServer server = new MockWebServer())
+		{
+			server.enqueue(new MockResponse().setBody(
+				"{\"displayName\":\"TCG_Bruh Name\",\"revision\":1,\"cardNames\":[]}"));
+			TcgGroupCollectionClient client = new TcgGroupCollectionClient(
+				new OkHttpClient(), syncEnabled(true), server.url("/"));
+			CapturingBetaCallback callback = new CapturingBetaCallback();
+			client.fetchBetaNames("TCG_Bruh Name", callback);
+
+			assertTrue(callback.await());
+			assertNotNull(callback.result);
+			RecordedRequest request = server.takeRequest(1, TimeUnit.SECONDS);
+			assertEquals("/api/v1/players/TCG__Bruh%20Name/beta-names", request.getPath());
+		}
+	}
+
+	@Test
+	public void missingBetaPlayerIsDistinctFromFailure() throws Exception
+	{
+		try (MockWebServer server = new MockWebServer())
+		{
+			server.enqueue(new MockResponse().setResponseCode(404).setBody(
+				"{\"error\":{\"code\":\"player_not_found\",\"message\":\"Player not found\"}}"));
+			TcgGroupCollectionClient client = new TcgGroupCollectionClient(
+				new OkHttpClient(), syncEnabled(true), server.url("/"));
+			CapturingBetaCallback callback = new CapturingBetaCallback();
+			client.fetchBetaNames("Missing", callback);
+
+			assertTrue(callback.await());
+			assertTrue(callback.notFound);
+			assertFalse(callback.failed);
+		}
+	}
+
+	@Test
+	public void unrelatedBeta404IsFailure() throws Exception
+	{
+		try (MockWebServer server = new MockWebServer())
+		{
+			server.enqueue(new MockResponse().setResponseCode(404).setBody(
+				"{\"error\":{\"code\":\"other\"}}"));
+			TcgGroupCollectionClient client = new TcgGroupCollectionClient(
+				new OkHttpClient(), syncEnabled(true), server.url("/"));
+			CapturingBetaCallback callback = new CapturingBetaCallback();
+			client.fetchBetaNames("Missing", callback);
+
+			assertTrue(callback.await());
+			assertTrue(callback.failed);
+			assertFalse(callback.notFound);
 		}
 	}
 
@@ -185,6 +267,11 @@ public class TcgGroupCollectionClientTest
 			assertTrue(collection.await());
 			assertTrue(collection.failed);
 
+			CapturingBetaCallback beta = new CapturingBetaCallback();
+			assertNull(client.fetchBetaNames("Player", beta));
+			assertTrue(beta.await());
+			assertTrue(beta.failed);
+
 			assertEquals("no request may reach osrs-tcg.net while the toggle is off",
 				0, server.getRequestCount());
 		}
@@ -231,6 +318,40 @@ public class TcgGroupCollectionClientTest
 		public void onSuccess(T result)
 		{
 			this.result = result;
+			done.countDown();
+		}
+
+		@Override
+		public void onFailure()
+		{
+			failed = true;
+			done.countDown();
+		}
+
+		private boolean await() throws InterruptedException
+		{
+			return done.await(2, TimeUnit.SECONDS);
+		}
+	}
+
+	private static final class CapturingBetaCallback implements TcgGroupCollectionClient.BetaNamesCallback
+	{
+		private final CountDownLatch done = new CountDownLatch(1);
+		private TcgGroupCollectionClient.BetaNames result;
+		private boolean failed;
+		private boolean notFound;
+
+		@Override
+		public void onSuccess(TcgGroupCollectionClient.BetaNames result)
+		{
+			this.result = result;
+			done.countDown();
+		}
+
+		@Override
+		public void onPlayerNotFound()
+		{
+			notFound = true;
 			done.countDown();
 		}
 
