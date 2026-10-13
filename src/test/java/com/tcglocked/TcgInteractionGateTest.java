@@ -133,4 +133,49 @@ public class TcgInteractionGateTest
 			+ "\"groupRoles\":[\"master\",\"monsters\"]}]}";
 		assertNull(gateOf(slayer).firstMissing("npc", "Steve", "Talk-to", owning("steve")));
 	}
+
+	/**
+	 * loot roles describe an NPC's drop table, not a prerequisite. Enforcing them makes the reward
+	 * for an action its own entry price, so a pickpocket needs the whole table before the first steal.
+	 */
+	@Test
+	public void lootRolesDoNotGateThePickpocketThatDropsThem()
+	{
+		String thieving = "{\"nodes\":[{\"category\":\"pickpocketing\",\"kind\":\"npc\","
+			+ "\"name\":\"Steve\",\"options\":[\"pickpocket\"],"
+			+ "\"requiredCardGroups\":[[\"Coins\"],[\"Coin pouch\"],[\"Ham hood\"],[\"Bronze arrow\"]],"
+			+ "\"groupRoles\":[\"\",\"\",\"loot\",\"loot-ham\"]}]}";
+		assertNull(gateOf(thieving)
+			.firstMissing("npc", "Steve", "Pickpocket", owning("coins", "coin pouch")));
+	}
+
+	@Test
+	public void lootRolesStillLeaveTheCoreRequirementsEnforced()
+	{
+		String thieving = "{\"nodes\":[{\"category\":\"pickpocketing\",\"kind\":\"npc\","
+			+ "\"name\":\"Steve\",\"options\":[\"pickpocket\"],"
+			+ "\"requiredCardGroups\":[[\"Coins\"],[\"Coin pouch\"],[\"Bronze arrow\"]],"
+			+ "\"groupRoles\":[\"\",\"\",\"loot\"]}]}";
+		assertEquals("Coin pouch",
+			gateOf(thieving).firstMissing("npc", "Steve", "Pickpocket", owning("coins")));
+	}
+
+	/**
+	 * The worst case in the bundled catalog: 39 groups, 37 of them drop-table entries. Guards the
+	 * real data rather than a fixture, because the roles come from the file and not from the code.
+	 */
+	@Test
+	public void bundledCatalogLetsYouPickpocketHamMembersWithTheCoreCards()
+	{
+		TcgInteractionGate gate = new TcgInteractionGate(new TcgInteractionCatalog(GSON));
+		assertNull(gate.firstMissing("npc", "H.A.M. Member", "Pickpocket",
+			owning("coins", "coin pouch")));
+	}
+
+	@Test
+	public void bundledCatalogStillRequiresTheCoreCardsToPickpocket()
+	{
+		TcgInteractionGate gate = new TcgInteractionGate(new TcgInteractionCatalog(GSON));
+		assertEquals("Coins", gate.firstMissing("npc", "H.A.M. Member", "Pickpocket", owning()));
+	}
 }
