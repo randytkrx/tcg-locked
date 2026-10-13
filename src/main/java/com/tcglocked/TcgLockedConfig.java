@@ -343,10 +343,11 @@ public interface TcgLockedConfig extends Config
 		name = "Update live card catalogue",
 		description = "Refresh the public card catalogue on startup and every ten minutes. Uses the last "
 			+ "validated disk cache when offline. Independent of player and group collection lookups.",
-		warning = "This contacts osrs-tcg.net for the public catalogue. The server sees your IP address. "
-			+ "No RuneScape name, profile, group key or collection is sent.",
-		section = ADVANCED,
-		position = 2
+		warning = "Turning this on sends your RuneScape display name, your OSRS TCG group key, and group member "
+				+ "display names to osrs-tcg.net to retrieve public collections. That server will see your IP address "
+				+ "and the names requested. Leave it off to prevent player and group collection lookups.",
+		section = FEEDBACK,
+		position = 9
 	)
 	default boolean liveCatalog()
 	{
