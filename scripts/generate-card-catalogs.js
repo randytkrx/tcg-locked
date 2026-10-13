@@ -81,6 +81,25 @@ if (!fs.existsSync(legacyIndexPath))
 	]) + sorted.join('\n') + '\n', 'utf8');
 }
 
+// The released v3 bitmap is a protocol index, not a live gameplay catalogue. Capture it once
+// before regenerating any resources, then leave it unchanged on all subsequent runs.
+const frozenV3Path = resource('legacy-v3-card-keys.txt');
+if (!fs.existsSync(frozenV3Path))
+{
+	const keys = new Set(dataLines('item-cards.txt').map(normalize).filter(Boolean));
+	for (const line of dataLines('npc-cards.txt'))
+	{
+		const parts = line.split('|');
+		(parts.length === 1 ? parts : parts.slice(1)).forEach(name => keys.add(normalize(name)));
+	}
+	keys.delete('');
+	fs.writeFileSync(frozenV3Path, header([
+		'Exact sorted normalized key index of the released v3 bitmap.',
+		'Compatibility resource: never regenerate from a newer catalog or edit by hand.',
+		keys.size + ' keys.',
+	]) + [...keys].sort().join('\n') + '\n', 'utf8');
+}
+
 const itemNames = new Set(legacyItems);
 // Match v1's LiveCardsCatalogParser exactly: only an exact current parent-name collision gets an
 // npc:<id> storage identity. Normalized or legacy aliases must not create identities v1 never emits.

@@ -23,6 +23,7 @@ public class TcgLockedPartyMessageCompatibilityTest
 		message.setSeen(20);
 		message.setOwnedKeys(Set.of("rope", "shark"));
 		message.setPackedOwnedKeys("2:catalog:zpayload");
+		message.setExtraOwnedKeys("self-describing-extension");
 		message.setSharedWith(Set.of("alice"));
 
 		TcgLockedPartyProgressMessage decoded = GSON.fromJson(
@@ -32,6 +33,7 @@ public class TcgLockedPartyMessageCompatibilityTest
 		assertEquals(20, decoded.getSeen());
 		assertEquals(Set.of("rope", "shark"), decoded.getOwnedKeys());
 		assertEquals("2:catalog:zpayload", decoded.getPackedOwnedKeys());
+		assertEquals("self-describing-extension", decoded.getExtraOwnedKeys());
 		assertEquals(Set.of("alice"), decoded.getSharedWith());
 	}
 
@@ -43,6 +45,7 @@ public class TcgLockedPartyMessageCompatibilityTest
 			TcgLockedPartyProgressMessage.class);
 		assertEquals(Set.of("rope"), decoded.getOwnedKeys());
 		assertNull(decoded.getPackedOwnedKeys());
+		assertNull(decoded.getExtraOwnedKeys());
 		assertNull(decoded.getSharedWith());
 	}
 

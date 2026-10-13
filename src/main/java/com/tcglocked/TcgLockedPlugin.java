@@ -163,6 +163,14 @@ public class TcgLockedPlugin extends Plugin
 	private TcgCardCatalog cardCatalog;
 
 	@Inject
+	private TcgLiveCatalogService liveCatalogService;
+
+	@Inject
+	private TcgSharedCardCatalog sharedCardCatalog;
+
+	private TcgLiveCatalogSnapshot activeLiveCatalog;
+
+	@Inject
 	private TcgGroupCollectionClient groupCollectionClient;
 
 	@Inject
@@ -336,6 +344,7 @@ public class TcgLockedPlugin extends Plugin
 		panel.setConsentAction(this::setPoolConsent);
 		panel.setSharedCatalogAction(this::openSharedCatalog);
 		sharedCatalogManager.start();
+		liveCatalogService.start(config.liveCatalog(), this::scheduleRefresh);
 		navButton = NavigationButton.builder()
 			.tooltip("TCG Locked")
 			.icon(TcgLockedPanel.crestIcon(24))
@@ -410,6 +419,10 @@ public class TcgLockedPlugin extends Plugin
 	{
 		started = false;
 		lifecycleGeneration++;
+		liveCatalogService.stop();
+		activeLiveCatalog = null;
+		cardCatalog.activate(null);
+		sharedCardCatalog.activate(null);
 		panel.setSharedCatalogAction(null);
 		panel.setRefreshAction(null);
 		panel.setConsentAction(null);
@@ -525,6 +538,10 @@ public class TcgLockedPlugin extends Plugin
 	{
 		if (TcgLockedConfig.GROUP.equals(event.getGroup()))
 		{
+			if (TcgLockedConfig.LIVE_CATALOG.equals(event.getKey()))
+			{
+				liveCatalogService.setEnabled(config.liveCatalog());
+			}
 			if ("partyShare".equals(event.getKey()))
 			{
 				if (config.partyShare())
@@ -716,6 +733,7 @@ public class TcgLockedPlugin extends Plugin
 			// Compatibility with clients released before packed party collections.
 			sent = cardCatalog.mergePackedAndRawKeys(null, message.getOwnedKeys());
 		}
+		sent = cardCatalog.mergeExtraKeys(sent, message.getExtraOwnedKeys());
 		PartyMember from = partyService.getMemberById(message.getMemberId());
 		String partnerKey = from == null ? "" : rememberMemberKey(from);
 		boolean addressed = addressedToUs(message.getSharedWith());
@@ -870,6 +888,16 @@ public class TcgLockedPlugin extends Plugin
 		message.setSharedWith(audience);
 		if (!audience.isEmpty() && (force || collectionChanged || audienceChanged))
 		{
+			try
+			{
+				message.setExtraOwnedKeys(TcgCollectionCodec.encode(cardCatalog.extraKeys(ownedNormalized)));
+			}
+			catch (IllegalArgumentException ex)
+			{
+				// Never send a partial collection that would revoke a partner's valid cached keys.
+				log.debug("TCG Locked: collection exceeds party extension limits", ex);
+				return;
+			}
 			message.setPackedOwnedKeys(cardCatalog.packKeys(ownedNormalized));
 			// Keep interoperability with the currently released pre-bitmap client during rollout.
 			message.setOwnedKeys(cardCatalog.filterLegacyKeys(ownedNormalized));
@@ -1154,6 +1182,7 @@ public class TcgLockedPlugin extends Plugin
 		invokeLaterIfStarted(() ->
 		{
 			forceQueryTcgApi();
+			liveCatalogService.refresh();
 			localBetaAttempted = false;
 			fetchLocalBetaIfNeeded();
 			groupBetaAttempted = false;
@@ -1207,6 +1236,7 @@ public class TcgLockedPlugin extends Plugin
 	/** Runs on the client thread (scheduled via {@link #scheduleRefresh()}), so unlock-diff state has no races. */
 	private void refreshOwned()
 	{
+		updateActiveCatalog();
 		lastUpdatedMs = System.currentTimeMillis();
 		lockbookDirty = true;
 		// Load this profile's lockbook once the RS profile is available (first refresh after login).
@@ -1281,6 +1311,27 @@ public class TcgLockedPlugin extends Plugin
 		recomputeEquippedViolations(client.getItemContainer(InventoryID.WORN));
 		recomputeLockedInBag(client.getItemContainer(InventoryID.INV));
 		publishStatus();
+	}
+
+	/** Only v1 ownership enables current identities; the beta name-only API keeps its old fallback. */
+	private void updateActiveCatalog()
+	{
+		TcgLiveCatalogSnapshot next = collectionReader.hasItemIds() && collectionReader.hasNpcIds()
+			? liveCatalogService.snapshot() : null;
+		if (next == activeLiveCatalog)
+		{
+			return;
+		}
+		activeLiveCatalog = next;
+		log.info("TCG Locked: {} catalogue active", next == null ? "bundled" : "live");
+		cardCatalog.activate(next);
+		sharedCardCatalog.activate(next);
+		sharedCatalogManager.catalogChanged(sharedCatalogSnapshot());
+		lockbookDirty = true;
+		markSharedCatalogDirty();
+		warnedViolationItemIds.clear();
+		lastBroadcast = null;
+		lastSharedWithBronzeman = null;
 	}
 
 	/** Reconciles the quiet-period queue and reports whether this snapshot added a new card. */
@@ -1464,7 +1515,7 @@ public class TcgLockedPlugin extends Plugin
 			if (source == TcgLockedStatus.UnlockSource.POOLED)
 			{
 				pooled++;
-				unlockedBy = partnersUnlocking(TcgItemNameNormalizer.normalize(itemName(id)));
+				unlockedBy = partnersUnlocking(id, TcgItemNameNormalizer.normalize(itemName(id)));
 				for (String partner : unlockedBy)
 				{
 					contributions.merge(partner, 1, Integer::sum);
@@ -1751,9 +1802,8 @@ public class TcgLockedPlugin extends Plugin
 	 */
 	private boolean ownsNormalizedCard(String normalizedCard)
 	{
-		return ownedNormalized.contains(normalizedCard)
-			|| extraAllowNormalized.contains(normalizedCard)
-			|| unlockedByParty(normalizedCard);
+		return cardCatalog.requirementSatisfied(normalizedCard, key -> ownedNormalized.contains(key)
+			|| extraAllowNormalized.contains(key) || unlockedByParty(key));
 	}
 
 	/**
@@ -1998,9 +2048,21 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return TcgLockedStatus.UnlockSource.EXEMPT;
 		}
-		if (unlockedByParty(key))
+		Set<String> parents = cardCatalog.itemCards(itemId, key);
+		if (parents.isEmpty() && canonical != itemId)
 		{
-			return TcgLockedStatus.UnlockSource.POOLED;
+			parents = cardCatalog.itemCards(canonical, key);
+		}
+		for (String parent : parents)
+		{
+			if (localBetaOwnedKeys.contains(parent))
+			{
+				return TcgLockedStatus.UnlockSource.OWNED;
+			}
+			if (unlockedByParty(parent))
+			{
+				return TcgLockedStatus.UnlockSource.POOLED;
+			}
 		}
 		if (config.unlockStarterGear() && key.startsWith("bronze "))
 		{
@@ -2025,22 +2087,27 @@ public class TcgLockedPlugin extends Plugin
 	}
 
 	/** @return the synced partners whose cards unlock this item, for the panel's group view. */
-	private List<String> partnersUnlocking(String key)
+	private List<String> partnersUnlocking(int itemId, String key)
 	{
 		if (!config.partyShare() || key.isEmpty())
 		{
 			return Collections.emptyList();
 		}
+		Set<String> parents = cardCatalog.itemCards(itemId, key);
+		if (parents.isEmpty())
+		{
+			parents = cardCatalog.itemCards(itemManager.canonicalize(itemId), key);
+		}
 		List<String> names = new ArrayList<>();
 		for (Map.Entry<String, Set<String>> entry : pooledKeys.entrySet())
 		{
 			Set<String> keys = entry.getValue();
-			if (keys != null && keys.contains(key))
+			if (keys != null && !Collections.disjoint(keys, parents))
 			{
 				names.add(entry.getKey());
 			}
 		}
-		if (tcgGroupOwnedKeys.contains(key))
+		if (!Collections.disjoint(tcgGroupOwnedKeys, parents))
 		{
 			names.add(TCG_GROUP_LABEL);
 		}
@@ -2327,7 +2394,11 @@ public class TcgLockedPlugin extends Plugin
 	/** Stores an approved partner's collection as a packed bitmap under their name. */
 	private void savePooledPartner(String partnerKey, Set<String> keys)
 	{
-		String packed = cardCatalog.packKeys(keys);
+		String packed = cardCatalog.packStoredKeys(keys);
+		if (packed == null)
+		{
+			return;
+		}
 		if (packed.isEmpty())
 		{
 			forgetPooledPartner(partnerKey);
@@ -2471,11 +2542,16 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return;
 		}
+		String packed = cardCatalog.packStoredKeys(tcgGroupCurrentKeys);
+		if (packed == null)
+		{
+			return;
+		}
 		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_CACHE_REVISION);
 		configManager.setRSProfileConfiguration(
 			TcgLockedConfig.GROUP, TCG_GROUP_CACHE_KEY, activeTcgGroupKey);
 		configManager.setRSProfileConfiguration(
-			TcgLockedConfig.GROUP, TCG_GROUP_CACHE_CARDS, cardCatalog.packKeys(tcgGroupCurrentKeys));
+			TcgLockedConfig.GROUP, TCG_GROUP_CACHE_CARDS, packed);
 		// Revision is written last and acts as the commit marker for the key + collection pair.
 		configManager.setRSProfileConfiguration(
 			TcgLockedConfig.GROUP, TCG_GROUP_CACHE_REVISION, Integer.toString(tcgGroupRevision));
@@ -2541,11 +2617,16 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return;
 		}
+		String packed = cardCatalog.packStoredKeys(localBetaOwnedKeys);
+		if (packed == null)
+		{
+			return;
+		}
 		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, LOCAL_BETA_CACHE_REVISION);
 		configManager.setRSProfileConfiguration(
 			TcgLockedConfig.GROUP, LOCAL_BETA_CACHE_PLAYER, activeLocalBetaPlayer);
 		configManager.setRSProfileConfiguration(
-			TcgLockedConfig.GROUP, LOCAL_BETA_CACHE_CARDS, cardCatalog.packKeys(localBetaOwnedKeys));
+			TcgLockedConfig.GROUP, LOCAL_BETA_CACHE_CARDS, packed);
 		configManager.setRSProfileConfiguration(
 			TcgLockedConfig.GROUP, LOCAL_BETA_CACHE_REVISION, Integer.toString(localBetaRevision));
 	}
@@ -2605,8 +2686,7 @@ public class TcgLockedPlugin extends Plugin
 			return;
 		}
 		localBetaRequest = null;
-		Set<String> known = cardCatalog.allCardKeys();
-		known.retainAll(result.cardKeys);
+		Set<String> known = new HashSet<>(result.cardKeys);
 		localBetaOwnedKeys = Collections.unmodifiableSet(known);
 		localBetaRevision = result.revision;
 		activeLocalBetaPlayer = result.displayName;
@@ -2683,9 +2763,14 @@ public class TcgLockedPlugin extends Plugin
 
 	private void persistTcgGroupBetaCache()
 	{
+		String packed = cardCatalog.packStoredKeys(tcgGroupBetaKeys);
+		if (packed == null)
+		{
+			return;
+		}
 		configManager.unsetRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_BETA_REVISION);
 		configManager.setRSProfileConfiguration(TcgLockedConfig.GROUP, TCG_GROUP_BETA_CARDS,
-			cardCatalog.packKeys(tcgGroupBetaKeys));
+			packed);
 		List<String> members = new ArrayList<>(tcgGroupMemberNames);
 		Collections.sort(members, String.CASE_INSENSITIVE_ORDER);
 		configManager.setRSProfileConfiguration(
@@ -2767,8 +2852,7 @@ public class TcgLockedPlugin extends Plugin
 		groupBetaFailed |= failed;
 		if (!failed)
 		{
-			Set<String> known = cardCatalog.allCardKeys();
-			known.retainAll(keys);
+			Set<String> known = new HashSet<>(keys);
 			pendingGroupBetaKeys.addAll(known);
 		}
 		if (--pendingGroupBetaRequests > 0)
@@ -2894,8 +2978,7 @@ public class TcgLockedPlugin extends Plugin
 		}
 		// A previous revision's per-member requests must not be allowed to finish into this snapshot.
 		cancelGroupBetaRequests();
-		Set<String> known = cardCatalog.allCardKeys();
-		known.retainAll(collection.cardKeys);
+		Set<String> known = new HashSet<>(collection.cardKeys);
 		tcgGroupCurrentKeys = Collections.unmodifiableSet(known);
 		tcgGroupRevision = collection.revision;
 		Set<String> members = new HashSet<>(collection.memberNames);
@@ -2983,7 +3066,7 @@ public class TcgLockedPlugin extends Plugin
 		{
 			return true;
 		}
-		Set<String> cards = cardCatalog.npcCards(key);
+		Set<String> cards = cardCatalog.npcCards(npcId, key);
 		boolean hasNpcIds = npcId >= 0 && collectionReader.hasNpcIds();
 		if (hasNpcIds && collectionReader.ownsNpcId(npcId))
 		{

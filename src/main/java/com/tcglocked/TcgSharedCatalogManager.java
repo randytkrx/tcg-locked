@@ -27,7 +27,7 @@ final class TcgSharedCatalogManager
 	private final ClientThread clientThread;
 	private final ItemManager itemManager;
 	private final TcgSharedNpcImageCache npcImages;
-	private final Set<String> wantedItemKeys;
+	private Set<String> wantedItemKeys;
 	private Map<String, Integer> itemIds;
 	private Map<String, Integer> buildingItemIds;
 	private int itemScanCursor;
@@ -44,6 +44,11 @@ final class TcgSharedCatalogManager
 		this.clientThread = clientThread;
 		this.itemManager = itemManager;
 		this.npcImages = npcImages;
+		rebuildWantedKeys();
+	}
+
+	private void rebuildWantedKeys()
+	{
 		Set<String> wanted = new HashSet<>();
 		for (TcgSharedCardCatalog.Card card : catalog.cards())
 		{
@@ -176,6 +181,30 @@ final class TcgSharedCatalogManager
 			if (window != null && window.isVisible())
 			{
 				window.refresh(snapshot);
+			}
+		});
+	}
+
+	synchronized void catalogChanged(TcgSharedCatalogSnapshot snapshot)
+	{
+		generation++;
+		itemIds = null;
+		buildingItemIds = null;
+		itemScanCursor = 0;
+		rebuildWantedKeys();
+		final int current = generation;
+		SwingUtilities.invokeLater(() ->
+		{
+			synchronized (TcgSharedCatalogManager.this)
+			{
+				if (!started || generation != current)
+				{
+					return;
+				}
+				if (window != null && window.isVisible())
+				{
+					show(snapshot);
+				}
 			}
 		});
 	}
