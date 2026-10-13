@@ -81,6 +81,18 @@ public class TcgSharedCardCatalogTest
 		assertEquals(Collections.singleton("rope"), snapshot.combinedKeys());
 	}
 
+	@Test
+	public void liveCatalogRefreshesNamesAndCollisionKeysWhileKeepingBetaHistory()
+	{
+		catalog.activate(TcgLiveCatalogSnapshot.parse(TcgLiveCatalogSnapshotTest.SMALL));
+		assertCard("Live parent", "live parent", TcgSharedCardCatalog.Category.ITEM);
+		assertTrue(catalog.cards().stream().anyMatch(card -> card.category == TcgSharedCardCatalog.Category.NPC
+			&& card.name.equals("Live parent") && card.key.equals("npc:200")));
+		assertTrue(catalog.cards().stream().anyMatch(card -> card.name.equals("Abyssal whip")));
+		catalog.activate(null);
+		assertEquals(7603, catalog.cards().size());
+	}
+
 	private void assertCard(String name, String key, TcgSharedCardCatalog.Category category)
 	{
 		TcgSharedCardCatalog.Card card = card(name);

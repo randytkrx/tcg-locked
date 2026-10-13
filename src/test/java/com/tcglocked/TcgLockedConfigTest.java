@@ -31,6 +31,15 @@ public class TcgLockedConfigTest
 	};
 
 	@Test
+	public void liveCatalogIsOptInWithItsOwnWarning() throws Exception
+	{
+		assertFalse(DEFAULTS.liveCatalog());
+		ConfigItem item = TcgLockedConfig.class.getMethod(TcgLockedConfig.LIVE_CATALOG).getAnnotation(ConfigItem.class);
+		assertEquals(TcgLockedConfig.LIVE_CATALOG, item.keyName());
+		assertFalse(item.warning().isEmpty());
+	}
+
+	@Test
 	public void groupSyncIsOffByDefault()
 	{
 		assertFalse(DEFAULTS.syncGroupCollection());

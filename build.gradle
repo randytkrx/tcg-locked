@@ -34,3 +34,14 @@ tasks.withType(JavaCompile) {
 	options.encoding = 'UTF-8'
 	options.release = 11
 }
+
+// Local development only; the launcher and test dependencies are not included in the plugin JAR.
+tasks.register('run', JavaExec) {
+	dependsOn tasks.named('testClasses')
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'com.tcglocked.TcgLockedPluginTest'
+	jvmArgs '-ea',
+		'--add-opens=java.base/java.net=ALL-UNNAMED',
+		'--add-opens=java.base/java.io=ALL-UNNAMED'
+	args '--developer-mode', '--debug'
+}

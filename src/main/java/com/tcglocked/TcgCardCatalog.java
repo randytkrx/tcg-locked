@@ -31,7 +31,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeSet;
 import java.util.zip.DataFormatException;
 import java.util.zip.Deflater;
 import java.util.zip.Inflater;
@@ -40,12 +39,10 @@ import javax.inject.Singleton;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Which items and monsters have a card at all, from a bundled snapshot of OSRS TCG's card list.
+ * Which items and monsters have a card, from a validated live snapshot or the bundled fallback.
  *
- * <p>This is the "is it part of the challenge" question, and it is deliberately answered from a
- * static resource rather than live from the TCG plugin: the card list changes only when the
- * upstream catalog does, and unlike ownership it is the same for every player. Regenerate with
- * {@code scripts/generate-card-catalogs.js} when the upstream catalog gains cards.</p>
+ * <p>The bundled bitmap index stays fixed for saved collections and older party clients. Live
+ * identity updates never change what an existing bitmap means.</p>
  *
  * <p>It matters because roughly 5,100 of the game's items have a card. Anything else — a Salve
  * amulet, a Max cape, a teleport tablet — can never have its card owned, so gating it would be a
@@ -64,6 +61,7 @@ class TcgCardCatalog
 	private static final String ITEM_ID_RESOURCE = "item-card-ids.txt";
 	private static final String NPC_ID_RESOURCE = "npc-card-ids.txt";
 	private static final String LEGACY_V2_RESOURCE = "legacy-v2-card-keys.txt";
+	private static final String FROZEN_V3_RESOURCE = "legacy-v3-card-keys.txt";
 
 	/** Leading tag on a packed collection: a raw bitmap, or one that was worth deflating. */
 	private static final char PACKED_RAW = 'b';
@@ -86,7 +84,9 @@ class TcgCardCatalog
 
 	/** Normalized in-game NPC name to the normalized card names that unlock it (any one suffices). */
 	private Map<String, Set<String>> npcCardKeys = Collections.emptyMap();
+	private final Map<String, Set<String>> betaNpcCardKeys = new HashMap<>();
 	private Set<Integer> npcCardIds = Collections.emptySet();
+	private volatile TcgLiveCatalogSnapshot live;
 
 	@Inject
 	TcgCardCatalog()
@@ -100,19 +100,23 @@ class TcgCardCatalog
 	 */
 	boolean hasItemCard(String normalizedItemKey)
 	{
-		return normalizedItemKey != null && itemCardKeys.contains(normalizedItemKey);
+		TcgLiveCatalogSnapshot current = live;
+		return normalizedItemKey != null && (current == null ? itemCardKeys.contains(normalizedItemKey)
+			: current.itemKeysByName.containsKey(normalizedItemKey));
 	}
 
 	/** @return true if this current game item ID belongs to a card or one of its variants. */
 	boolean hasItemCard(int itemId)
 	{
-		return itemCardIds.contains(itemId);
+		TcgLiveCatalogSnapshot current = live;
+		return current == null ? itemCardIds.contains(itemId) : current.itemKeysById.containsKey(itemId);
 	}
 
 	/** @return true if this current game NPC ID belongs to a card or one of its variants. */
 	boolean hasNpcCard(int npcId)
 	{
-		return npcCardIds.contains(npcId);
+		TcgLiveCatalogSnapshot current = live;
+		return current == null ? npcCardIds.contains(npcId) : current.npcKeysById.containsKey(npcId);
 	}
 
 	/**
@@ -126,15 +130,16 @@ class TcgCardCatalog
 		{
 			return Collections.emptySet();
 		}
-		return npcCardKeys.getOrDefault(normalizedNpcKey, Collections.emptySet());
+		TcgLiveCatalogSnapshot current = live;
+		return current == null ? npcCardKeys.getOrDefault(normalizedNpcKey, Collections.emptySet())
+			: current.npcKeysByName.getOrDefault(normalizedNpcKey, Collections.emptySet());
 	}
 
 	/**
-	 * Packs card keys into a base64 bitmap over {@link #indexedKeys}, for storing a synced partner's
+	 * Packs released card keys into the frozen v3 bitmap, for compatibility with an older partner's
 	 * collection. A full collection is thousands of names; as text that is tens of kilobytes of
 	 * synced config per partner, and as a bitmap it is around a kilobyte. Keys outside the catalog
-	 * are dropped, which is lossless for gating: a card with no matching item or monster cannot
-	 * unlock anything.
+	 * are carried separately by {@link #packStoredKeys} and the party-message extension.
 	 */
 	String packKeys(Set<String> keys)
 	{
@@ -232,6 +237,33 @@ class TcgCardCatalog
 		{
 			return Collections.emptySet();
 		}
+		if (packed.startsWith("4:"))
+		{
+			if (packed.length() > TcgCollectionCodec.MAX_ENCODED + MAX_PACKED_LENGTH + 4)
+			{
+				return null;
+			}
+			int split = packed.lastIndexOf(':');
+			if (split < 2)
+			{
+				return null;
+			}
+			String bitmap = packed.substring(2, split);
+			// A v4 wrapper can contain only a released v2/v3 bitmap, never another wrapper.
+			if (!bitmap.isEmpty() && !bitmap.startsWith("2:") && !bitmap.startsWith("3:"))
+			{
+				return null;
+			}
+			Set<String> base = unpackKeysOrNull(bitmap);
+			Set<String> extra = TcgCollectionCodec.decode(packed.substring(split + 1));
+			if (base == null || extra == null)
+			{
+				return null;
+			}
+			Set<String> combined = new HashSet<>(base);
+			combined.addAll(extra);
+			return TcgCollectionCodec.validKeys(combined) ? Collections.unmodifiableSet(combined) : null;
+		}
 		if (packed.length() > MAX_PACKED_LENGTH)
 		{
 			return null;
@@ -290,14 +322,15 @@ class TcgCardCatalog
 
 	Set<String> filterKnownKeys(Set<String> keys)
 	{
-		if (keys == null || keys.size() > indexedKeys.size())
+		if (keys == null || keys.size() > allCardKeys().size())
 		{
 			return null;
 		}
+		Set<String> known = allCardKeys();
 		Set<String> filtered = new HashSet<>(keys.size());
 		for (String key : keys)
 		{
-			if (key == null || key.length() > 128 || !keyIndex.containsKey(key))
+			if (key == null || key.length() > 128 || !known.contains(key))
 			{
 				return null;
 			}
@@ -339,33 +372,161 @@ class TcgCardCatalog
 	/** @return every card key the catalog knows, in index order. */
 	Set<String> allCardKeys()
 	{
-		return new java.util.LinkedHashSet<>(indexedKeys);
+		Set<String> keys = new java.util.LinkedHashSet<>(indexedKeys);
+		keys.addAll(itemCardKeys);
+		npcCardKeys.values().forEach(keys::addAll);
+		TcgLiveCatalogSnapshot current = live;
+		if (current != null)
+		{
+			keys.addAll(current.allKeys);
+		}
+		return keys;
 	}
 
 	/** @return how many item cards loaded; 0 means the resource was missing and item gating is off. */
 	int itemCardCount()
 	{
-		return itemCardKeys.size();
+		TcgLiveCatalogSnapshot current = live;
+		return current == null ? itemCardKeys.size() : current.itemKeysByName.size();
 	}
 
 	/** @return how many monsters loaded; 0 means the resource was missing and monster gating is off. */
 	int npcCount()
 	{
-		return npcCardKeys.size();
+		TcgLiveCatalogSnapshot current = live;
+		return current == null ? npcCardKeys.size() : current.npcKeysByName.size();
 	}
 
 	int itemIdCount()
 	{
-		return itemCardIds.size();
+		TcgLiveCatalogSnapshot current = live;
+		return current == null ? itemCardIds.size() : current.itemKeysById.size();
 	}
 
 	int npcIdCount()
 	{
-		return npcCardIds.size();
+		TcgLiveCatalogSnapshot current = live;
+		return current == null ? npcCardIds.size() : current.npcKeysById.size();
+	}
+
+	void activate(TcgLiveCatalogSnapshot snapshot)
+	{
+		live = snapshot;
+	}
+
+	/** ID-based parent resolution for shared ownership; bundled fallback keeps its old name path. */
+	Set<String> itemCards(int id, String normalizedName)
+	{
+		TcgLiveCatalogSnapshot current = live;
+		return current == null ? Collections.singleton(normalizedName)
+			: current.itemKeysById.getOrDefault(id, Collections.emptySet());
+	}
+
+	Set<String> npcCards(int id, String normalizedName)
+	{
+		TcgLiveCatalogSnapshot current = live;
+		if (current == null || id < 0)
+		{
+			return npcCards(normalizedName);
+		}
+		Set<String> parents = current.npcKeysById.getOrDefault(id, Collections.emptySet());
+		if (parents.isEmpty())
+		{
+			return parents;
+		}
+		Set<String> compatible = new HashSet<>(parents);
+		// Reviewed historical names remain independent unlocks only for an entity still tracked
+		// by the live catalogue. Old bundled v1 entity IDs never leak into the active snapshot.
+		compatible.addAll(betaNpcCardKeys.getOrDefault(normalizedName, Collections.emptySet()));
+		return compatible;
+	}
+
+
+	/** Authored interaction requirements follow live parent names without adding remote gameplay rules. */
+	boolean requirementSatisfied(String key, java.util.function.Predicate<String> owns)
+	{
+		TcgLiveCatalogSnapshot current = live;
+		if (current == null)
+		{
+			return owns.test(key);
+		}
+		Set<String> items = current.itemKeysByName.getOrDefault(key, Collections.emptySet());
+		Set<String> npcs = current.npcKeysByName.getOrDefault(key, Collections.emptySet());
+		if (!items.isEmpty() && !npcs.isEmpty())
+		{
+			// The policy supplied only a name, so it cannot disambiguate the entity kind.
+			return true;
+		}
+		Set<String> candidates = !items.isEmpty() ? items : npcs;
+		if (candidates.isEmpty())
+		{
+			// Explicit npc:<id> storage keys are already unambiguous. A removed/unknown card
+			// cannot be acquired, so it must not leave an authored interaction permanently locked.
+			return current.allKeys.contains(key) ? owns.test(key) : true;
+		}
+		return candidates.stream().anyMatch(owns);
+	}
+
+	Set<String> extraKeys(Set<String> keys)
+	{
+		Set<String> extra = new HashSet<>(keys);
+		extra.removeAll(keyIndex.keySet());
+		return extra;
+	}
+
+	/** Existing keys retain the compact released bitmap. Only new keys need a names extension. */
+	String packStoredKeys(Set<String> keys)
+	{
+		if (!TcgCollectionCodec.validKeys(keys))
+		{
+			return null;
+		}
+		Set<String> extra = extraKeys(keys);
+		try
+		{
+			return extra.isEmpty() ? packKeys(keys) : "4:" + packKeys(keys) + ':' + TcgCollectionCodec.encode(extra);
+		}
+		catch (IllegalArgumentException ex)
+		{
+			return null;
+		}
+	}
+
+	Set<String> mergeExtraKeys(Set<String> base, String encoded)
+	{
+		if (encoded == null)
+		{
+			return base;
+		}
+		Set<String> extra = TcgCollectionCodec.decode(encoded);
+		if (base == null || extra == null)
+		{
+			return null;
+		}
+		Set<String> merged = new HashSet<>(base);
+		merged.addAll(extra);
+		return TcgCollectionCodec.validKeys(merged) ? Collections.unmodifiableSet(merged) : null;
 	}
 
 	private void load()
 	{
+		forEachLine("beta-npc-cards.txt", line ->
+		{
+			String[] parts = line.split("\\|");
+			Set<String> cards = betaNpcCardKeys.computeIfAbsent(TcgItemNameNormalizer.normalize(parts[0]),
+				unused -> new HashSet<>());
+			if (parts.length == 1)
+			{
+				cards.add(TcgItemNameNormalizer.normalize(parts[0]));
+			}
+			else
+			{
+				for (int i = 1; i < parts.length; i++)
+				{
+					cards.add(TcgItemNameNormalizer.normalize(parts[i]));
+				}
+			}
+		});
 		Set<Integer> itemIds = loadIds(ITEM_ID_RESOURCE);
 		Set<Integer> npcIds = loadIds(NPC_ID_RESOURCE);
 		Set<String> items = new HashSet<>();
@@ -417,12 +578,11 @@ class TcgCardCatalog
 		legacyKeySet = Collections.unmodifiableSet(new HashSet<>(legacy));
 		legacyCatalogHash = hashCatalog(legacyIndexedKeys);
 
-		// Sorted so the bit for a given card is the same on every client and across restarts. Monster
-		// CARD names go in, not the in-game names they are keyed by, because the card name is what a
-		// collection actually contains.
-		TreeSet<String> all = new TreeSet<>(items);
-		npcs.values().forEach(all::addAll);
-		indexedKeys = Collections.unmodifiableList(new ArrayList<>(all));
+		// This exact released index is independent of the active catalogue and future bundled
+		// resource regeneration. Never move the bit assigned to an existing saved card.
+		List<String> frozen = new ArrayList<>();
+		forEachLine(FROZEN_V3_RESOURCE, frozen::add);
+		indexedKeys = Collections.unmodifiableList(frozen);
 		catalogHash = hashCatalog(indexedKeys);
 		Map<String, Integer> index = new HashMap<>(indexedKeys.size() * 2);
 		for (int i = 0; i < indexedKeys.size(); i++)

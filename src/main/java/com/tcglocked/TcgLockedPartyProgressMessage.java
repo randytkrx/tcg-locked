@@ -33,6 +33,8 @@ public class TcgLockedPartyProgressMessage extends PartyMemberMessage
 	private Set<String> ownedKeys;
 	/** Versioned compressed catalog bitmap used by current clients. */
 	private String packedOwnedKeys;
+	/** Self-describing keys absent from the frozen bitmap; ignored by older clients. */
+	private String extraOwnedKeys;
 	/**
 	 * RuneScape names this player is sharing with. A party message reaches everyone, so the payload
 	 * has to say who it is meant for — recipients not named here ignore the cards.

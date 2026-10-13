@@ -26,6 +26,7 @@ public interface TcgLockedConfig extends Config
 {
 	String GROUP = "tcglocked";
 	String SYNC_GROUP_COLLECTION = "syncGroupCollection";
+	String LIVE_CATALOG = "liveCatalog";
 
 	enum Enforcement
 	{
@@ -286,7 +287,7 @@ public interface TcgLockedConfig extends Config
 	}
 
 	/**
-	 * The single switch for every request this plugin sends to a server of its own. It is off by
+	 * The opt-in switch for player and group collection requests. It is off by
 	 * default and the warning lives here rather than in runelite-plugin.properties, so the Plugin Hub
 	 * entry stays unmarked while the network access itself stays opt-in.
 	 *
@@ -303,7 +304,7 @@ public interface TcgLockedConfig extends Config
 			+ "failure never removes progress.",
 		warning = "Turning this on sends your RuneScape display name, your OSRS TCG group key, and group member "
 			+ "display names to osrs-tcg.net to retrieve public collections. That server will see your IP address "
-			+ "and the names requested. Leave it off if you would rather the plugin never talk to the network.",
+			+ "and the names requested. Leave it off to prevent player and group collection lookups.",
 		section = FEEDBACK,
 		position = 8
 	)
@@ -335,5 +336,21 @@ public interface TcgLockedConfig extends Config
 	default String extraAllowList()
 	{
 		return "";
+	}
+
+	@ConfigItem(
+		keyName = LIVE_CATALOG,
+		name = "Update live card catalogue",
+		description = "Refresh the public card catalogue on startup and every ten minutes. Uses the last "
+			+ "validated disk cache when offline. Independent of player and group collection lookups.",
+		warning = "Turning this on sends your RuneScape display name, your OSRS TCG group key, and group member "
+				+ "display names to osrs-tcg.net to retrieve public collections. That server will see your IP address "
+				+ "and the names requested. Leave it off to prevent player and group collection lookups.",
+		section = FEEDBACK,
+		position = 9
+	)
+	default boolean liveCatalog()
+	{
+		return false;
 	}
 }

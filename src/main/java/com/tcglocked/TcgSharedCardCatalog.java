@@ -18,7 +18,7 @@ import java.util.Map;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 
-/** Bundled card names and local-cache image identities for the Shared Cards window. */
+/** Active card names and local-cache image identities for the Shared Cards window. */
 @Singleton
 final class TcgSharedCardCatalog
 {
@@ -48,14 +48,20 @@ final class TcgSharedCardCatalog
 
 		private Card(String name, Category category, String imageUrl)
 		{
+			this(name, TcgItemNameNormalizer.normalize(name), category, imageUrl);
+		}
+
+		private Card(String name, String key, Category category, String imageUrl)
+		{
 			this.name = name;
-			this.key = TcgItemNameNormalizer.normalize(name);
+			this.key = key;
 			this.category = category;
 			this.imageUrl = imageUrl;
 		}
 	}
 
-	private final List<Card> cards;
+	private final List<Card> bundledCards;
+	private volatile List<Card> cards;
 
 	@Inject
 	TcgSharedCardCatalog()
@@ -63,12 +69,33 @@ final class TcgSharedCardCatalog
 		Map<String, Card> loaded = new LinkedHashMap<>();
 		loadItems(loaded);
 		loadNpcs(loaded);
-		cards = Collections.unmodifiableList(new ArrayList<>(loaded.values()));
+		bundledCards = Collections.unmodifiableList(new ArrayList<>(loaded.values()));
+		cards = bundledCards;
 	}
 
 	List<Card> cards()
 	{
 		return cards;
+	}
+
+	void activate(TcgLiveCatalogSnapshot snapshot)
+	{
+		if (snapshot == null)
+		{
+			cards = bundledCards;
+			return;
+		}
+		Map<String, Card> loaded = new LinkedHashMap<>();
+		for (TcgLiveCatalogSnapshot.Entry entry : snapshot.entries)
+		{
+			Category category = entry.npc ? Category.NPC : Category.ITEM;
+			Card card = new Card(entry.name, entry.key, category, entry.npc ? entry.imageUrl : null);
+			loaded.put(category.name() + '|' + entry.key, card);
+		}
+		// Historical cards remain visible independently. Do not retain stale v1 artwork or IDs.
+		read("beta-item-cards.txt", line -> add(loaded, line, Category.ITEM, null));
+		loadNpcResource(loaded, BETA_NPC_IMAGE_RESOURCE, true);
+		cards = Collections.unmodifiableList(new ArrayList<>(loaded.values()));
 	}
 
 	private void loadItems(Map<String, Card> loaded)
